@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import datetime
 import time
+import traceback
 
 def initialize(context):
     """
@@ -351,8 +352,8 @@ def get_stock_pool(context):
                         recent_profits = profits[-2:]  # 取最近两年
                         if all(p > 0 for p in recent_profits):  # 检查是否都为正
                             valid_profit_stocks.append(stock)
-                            log.info('股票 %s 最近两年%s: %.2f万, %.2f万' % 
-                                   (stock, profit_type, recent_profits[0]/10000, recent_profits[1]/10000))
+                            # log.info('股票 %s 最近两年%s: %.2f万, %.2f万' % 
+                            #        (stock, profit_type, recent_profits[0]/10000, recent_profits[1]/10000))
                         else:
                             problematic_stocks.append((stock, recent_profits))
                     else:
@@ -363,11 +364,11 @@ def get_stock_pool(context):
                 continue
                 
         # 输出被剔除的股票信息
-        if problematic_stocks:
-            log.info('以下股票因连续亏损被剔除:')
-            for stock, profits in problematic_stocks:
-                log.info('  %s: 最近两年利润: %.2f万, %.2f万' % 
-                        (stock, profits[0]/10000, profits[1]/10000))
+        # if problematic_stocks:
+        #     log.info('以下股票因连续亏损被剔除:')
+        #     for stock, profits in problematic_stocks:
+        #         log.info('  %s: 最近两年利润: %.2f万, %.2f万' % 
+        #                 (stock, profits[0]/10000, profits[1]/10000))
                 
         # 更新有效股票池
         valid_stocks = valid_profit_stocks
@@ -417,10 +418,10 @@ def get_stock_pool(context):
                 log.info('处理股票 %s 资产负债率时出错: %s' % (stock, str(e)))
                 continue
                 
-        if problematic_stocks:
-            log.info('以下股票因资产负债率过高被剔除:')
-            for stock, ratio in problematic_stocks:
-                log.info('  %s: 资产负债率 %.2f%%' % (stock, ratio))
+        # if problematic_stocks:
+        #     log.info('以下股票因资产负债率过高被剔除:')
+        #     for stock, ratio in problematic_stocks:
+        #         log.info('  %s: 资产负债率 %.2f%%' % (stock, ratio))
                 
         valid_stocks = filtered_stocks
         
@@ -458,10 +459,10 @@ def get_stock_pool(context):
         high_price_stocks = [(stock, price) for stock, price in prices.items() 
                             if price > threshold]
         
-        if high_price_stocks:
-            log.info('以下股票因收盘价过高被剔除:')
-            for stock, price in sorted(high_price_stocks, key=lambda x: x[1], reverse=True):
-                log.info('  %s: 收盘价 %.2f' % (stock, price))
+        # if high_price_stocks:
+        #     log.info('以下股票因收盘价过高被剔除:')
+        #     for stock, price in sorted(high_price_stocks, key=lambda x: x[1], reverse=True):
+        #         log.info('  %s: 收盘价 %.2f' % (stock, price))
                 
         valid_stocks = [stock for stock in valid_stocks if stock in prices 
                        and prices[stock] <= threshold]
@@ -594,6 +595,7 @@ def handle_data(context, data):
         # 打印选股结果
         log.info('选股结果数量: %d' % len(stock_pool))
         log.info('选股结果: %s' % stock_pool)
+        log.info('选股结果名称1: %s' % get_stock_info(stock_pool, ['stock_name']))
         
         # 这里可以添加您的交易逻辑
         # 例如：等权重分配资金到选中的股票
@@ -615,6 +617,366 @@ def handle_data(context, data):
     context.day_counter += 1
     log.info('选股结果数量: %d' % len(stock_pool))
     log.info('选股结果: %s' % stock_pool)
+    
+    # 获取排序需要的数据
+    try:
+        # 1. 获取收盘价数据
+        price_data = get_history(1, '1d', ['close'], security_list=stock_pool)
+        log.info('价格数据类型: %s' % type(price_data))
+        log.info('价格数据形状: %s' % str(price_data.shape if hasattr(price_data, 'shape') else 'N/A'))
+        log.info('价格数据列名: %s' % str(price_data.columns.tolist() if hasattr(price_data, 'columns') else 'N/A'))
+        if hasattr(price_data, 'head'):
+            log.info('价格数据前几行:\n%s' % str(price_data.head()))
+        
+        # 2. 获取股息率数据
+        dividend_data = get_fundamentals(stock_pool, 'valuation', fields=['dividend_ratio'])
+        log.info('股息率数据类型: %s' % type(dividend_data))
+        if hasattr(dividend_data, 'head'):
+            log.info('股息率数据前几行:\n%s' % str(dividend_data.head()))
+        
+        # 3. 获取总市值数据
+        market_data = get_fundamentals(stock_pool, 'valuation', fields=['total_value'])
+        log.info('总市值数据类型: %s' % type(market_data))
+        if hasattr(market_data, 'head'):
+            log.info('总市值数据前几行:\n%s' % str(market_data.head()))
+        
+        # 4. 获取净利润和股息支付率数据
+        try:
+            # 根据PTrade API文档，利润表支持按年份查询模式
+            # 获取最近一年的净利润数据用于计算股息支付率
+            current_year = int(context.current_dt.strftime('%Y'))
+            
+            # 获取净利润数据 - 使用年份查询模式获取最新财报数据
+            financial_data = get_fundamentals(
+                stock_pool, 
+                'income_statement', 
+                fields=['net_profit', 'np_parent_company_owners'],  # 移除secu_code，因为它通常在索引中
+                start_year=str(current_year-1),
+                end_year=str(current_year),
+                report_types='1'  # 年报数据，修正为字符串而非列表
+            )
+            
+            # 获取股息率数据 - 估值数据只支持按天查询模式
+            # 使用前一交易日的数据，确保数据可用性
+            dividend_data = get_fundamentals(
+                stock_pool, 
+                'valuation', 
+                fields=['dividend_ratio', 'total_value'],  # 移除secu_code，因为它通常在索引中
+                date=context.previous_date  # 使用前一交易日的数据，而不是当前日期
+            )
+            
+            # 尝试获取更多历史数据作为备选
+            if dividend_data is None or len(dividend_data) == 0:
+                log.warning("当前日期无法获取股息率数据，尝试获取30天前的数据")
+                past_date = (context.current_dt - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+                dividend_data = get_fundamentals(
+                    stock_pool, 
+                    'valuation', 
+                    fields=['dividend_ratio', 'total_value'],
+                    date=past_date
+                )
+            
+            # 打印数据结构信息用于调试
+            log.info(f'财务数据结构: 类型={type(financial_data)}, 形状={financial_data.shape if hasattr(financial_data, "shape") else "无形状"}')
+            log.info(f'财务数据列: {list(financial_data.columns) if hasattr(financial_data, "columns") else "无列信息"}')
+            if hasattr(financial_data, 'index'):
+                log.info(f'财务数据索引: {financial_data.index.names if hasattr(financial_data.index, "names") else "单级索引"}')
+            
+            log.info(f'股息数据结构: 类型={type(dividend_data)}, 形状={dividend_data.shape if hasattr(dividend_data, "shape") else "无形状"}')
+            log.info(f'股息数据列: {list(dividend_data.columns) if hasattr(dividend_data, "columns") else "无列信息"}')
+            if hasattr(dividend_data, 'index'):
+                log.info(f'股息数据索引: {dividend_data.index.names if hasattr(dividend_data.index, "names") else "单级索引"}')
+            
+        except Exception as e:
+            log.error(f'获取财务和股息数据时出错: {str(e)}')
+            log.error(traceback.format_exc())
+            # 创建空DataFrame作为备选
+            financial_data = pd.DataFrame()
+            dividend_data = pd.DataFrame()
+        
+        # 初始化股票因子字典
+        stock_factors = {}
+        
+        # 创建股息支付率计算函数
+        def calculate_payout_ratio(stock_code, financial_df, dividend_df):
+            """
+            计算股息支付率
+            股息支付率 = 每股股息 / 每股收益 * 100%
+            或者 股息支付率 = 总分红金额 / 净利润 * 100%
+            """
+            try:
+                log.info('开始计算股票 %s 的股息支付率' % stock_code)
+                
+                # 获取净利润数据
+                net_profit = 0
+                if not financial_df.empty:
+                    # 检查索引结构并筛选该股票的数据
+                    stock_financial = None
+                    
+                    # 如果是MultiIndex，尝试在不同级别查找股票代码
+                    if hasattr(financial_df.index, 'levels'):
+                        for level in range(len(financial_df.index.levels)):
+                            try:
+                                if stock_code in financial_df.index.get_level_values(level):
+                                    stock_financial = financial_df.xs(stock_code, level=level)
+                                    log.info('股票 %s 在财务数据第%d级索引中找到' % (stock_code, level))
+                                    break
+                            except:
+                                continue
+                    else:
+                        # 单级索引，直接查找
+                        if stock_code in financial_df.index:
+                            stock_financial = financial_df.loc[stock_code]
+                            log.info('股票 %s 在财务数据单级索引中找到' % stock_code)
+                    
+                    if stock_financial is not None and not stock_financial.empty:
+                        log.info('股票 %s 财务数据: %s' % (stock_code, str(stock_financial)))
+                        # 优先使用归属于母公司股东的净利润
+                        if 'net_profit_atsopc' in stock_financial.index:
+                            net_profit = stock_financial['net_profit_atsopc']
+                            log.info('使用net_profit_atsopc: %s' % str(net_profit))
+                        elif 'net_profit' in stock_financial.index:
+                            net_profit = stock_financial['net_profit']
+                            log.info('使用net_profit: %s' % str(net_profit))
+                        
+                        net_profit = float(net_profit) if pd.notna(net_profit) and net_profit != 0 else 0
+                        log.info('股票 %s 净利润: %.2f万元' % (stock_code, net_profit/10000))
+                    else:
+                        log.info('股票 %s 未找到财务数据' % stock_code)
+                else:
+                    log.info('财务数据为空')
+                
+                # 获取股息数据
+                dividend_amount = 0
+                if not dividend_df.empty:
+                    stock_dividend = None
+                    
+                    # 检查索引结构并筛选该股票的数据
+                    if hasattr(dividend_df.index, 'levels'):
+                        for level in range(len(dividend_df.index.levels)):
+                            try:
+                                if stock_code in dividend_df.index.get_level_values(level):
+                                    stock_dividend = dividend_df.xs(stock_code, level=level)
+                                    log.info('股票 %s 在股息数据第%d级索引中找到' % (stock_code, level))
+                                    break
+                            except:
+                                continue
+                    else:
+                        # 单级索引，直接查找
+                        if stock_code in dividend_df.index:
+                            stock_dividend = dividend_df.loc[stock_code]
+                            log.info('股票 %s 在股息数据单级索引中找到' % stock_code)
+                    
+                    if stock_dividend is not None and not stock_dividend.empty:
+                        log.info('股票 %s 股息数据: %s' % (stock_code, str(stock_dividend)))
+                        # 从股息率和市值计算分红金额
+                        dividend_ratio = 0
+                        market_value = 0
+                        
+                        # 处理股息率
+                        if isinstance(stock_dividend, pd.Series):
+                            if 'dividend_ratio' in stock_dividend.index:
+                                div_ratio = stock_dividend['dividend_ratio']
+                                if isinstance(div_ratio, str):
+                                    dividend_ratio = float(div_ratio.strip('%'))
+                                else:
+                                    dividend_ratio = float(div_ratio) if pd.notna(div_ratio) and div_ratio != 0 else 0
+                            
+                            if 'total_value' in stock_dividend.index:
+                                total_val = stock_dividend['total_value']
+                                market_value = float(total_val) if pd.notna(total_val) and total_val != 0 else 0
+                        elif isinstance(stock_dividend, pd.DataFrame):
+                            if 'dividend_ratio' in stock_dividend.columns:
+                                div_ratio = stock_dividend['dividend_ratio'].iloc[0]
+                                if isinstance(div_ratio, str):
+                                    dividend_ratio = float(div_ratio.strip('%'))
+                                else:
+                                    dividend_ratio = float(div_ratio) if pd.notna(div_ratio) and div_ratio != 0 else 0
+                            
+                            if 'total_value' in stock_dividend.columns:
+                                total_val = stock_dividend['total_value'].iloc[0]
+                                market_value = float(total_val) if pd.notna(total_val) and total_val != 0 else 0
+                        
+                        log.info('股票 %s 股息率: %.2f%%, 市值: %.2f万元' % (stock_code, dividend_ratio, market_value/10000))
+                        
+                        # 计算分红金额 = 市值 * 股息率 / 100
+                        dividend_amount = market_value * dividend_ratio / 100
+                        log.info('股票 %s 分红金额: %.2f万元' % (stock_code, dividend_amount/10000))
+                    else:
+                        log.info('股票 %s 未找到股息数据' % stock_code)
+                else:
+                    log.info('股息数据为空')
+                
+                # 计算股息支付率
+                # 确保net_profit和dividend_amount是标量值
+                net_profit_val = float(net_profit) if pd.notna(net_profit) else 0
+                dividend_amount_val = float(dividend_amount) if pd.notna(dividend_amount) else 0
+                
+                if net_profit_val > 0 and dividend_amount_val > 0:
+                    payout_ratio = (dividend_amount_val / net_profit_val) * 100
+                    final_ratio = min(payout_ratio, 100)  # 限制最大值为100%
+                    log.info('股票 %s 股息支付率: %.2f%%' % (stock_code, final_ratio))
+                    return final_ratio
+                else:
+                    log.info('股票 %s 股息支付率为0 (净利润: %.2f, 分红金额: %.2f)' % (stock_code, net_profit_val, dividend_amount_val))
+                    return 0
+                    
+            except Exception as e:
+                log.error(f'计算股票{stock_code}股息支付率时发生错误: {str(e)}')
+                return 0
+        
+        # 处理每个股票的因子数据
+        for stock in stock_pool:
+            try:
+                log.info('开始处理股票 %s 的因子数据' % stock)
+                
+                # 初始化股票因子数据
+                stock_factors[stock] = {
+                    'close_price': 0,
+                    'dividend_ratio': 0,
+                    'market_value': float('inf'),
+                    'payout_ratio': 0,
+                    'insider_holding': 0
+                }
+                
+                # 1. 处理收盘价数据
+                close_price = 0
+                if price_data is not None and not price_data.empty:
+                    # 根据PTrade API，price_data通常包含code列
+                    if 'code' in price_data.columns:
+                        stock_price_data = price_data[price_data['code'] == stock]
+                        if not stock_price_data.empty and 'close' in stock_price_data.columns:
+                            close_price = float(stock_price_data['close'].iloc[-1])
+                    # 如果是以股票代码为列名的格式
+                    elif stock in price_data.columns:
+                        close_price = float(price_data[stock].iloc[-1])
+                
+                stock_factors[stock]['close_price'] = close_price
+                log.info('股票 %s 收盘价: %.2f' % (stock, close_price))
+                
+                # 2. 处理股息率数据（从dividend_data中获取）
+                log.info('开始处理股票 %s 的股息率数据' % stock)
+                if not dividend_data.empty:
+                    stock_dividend = None
+                    
+                    # 检查索引结构并筛选该股票的数据
+                    if hasattr(dividend_data.index, 'levels'):
+                        for level in range(len(dividend_data.index.levels)):
+                            try:
+                                if stock in dividend_data.index.get_level_values(level):
+                                    stock_dividend = dividend_data.xs(stock, level=level)
+                                    log.info('股票 %s 在股息数据第%d级索引中找到' % (stock, level))
+                                    break
+                            except:
+                                continue
+                    else:
+                        # 单级索引，直接查找
+                        if stock in dividend_data.index:
+                            stock_dividend = dividend_data.loc[stock]
+                            log.info('股票 %s 在股息数据单级索引中找到' % stock)
+                    
+                    if stock_dividend is not None and not stock_dividend.empty:
+                        log.info('股票 %s 股息数据类型: %s' % (stock, type(stock_dividend)))
+                        log.info('股票 %s 股息数据内容: %s' % (stock, str(stock_dividend)))
+                        
+                        # 检查数据类型并处理股息率
+                        if isinstance(stock_dividend, pd.Series):
+                            # 如果是Series，直接通过索引访问
+                            if 'dividend_ratio' in stock_dividend.index:
+                                div_ratio = stock_dividend['dividend_ratio']
+                                if isinstance(div_ratio, str):
+                                    stock_factors[stock]['dividend_ratio'] = float(div_ratio.strip('%'))
+                                else:
+                                    stock_factors[stock]['dividend_ratio'] = float(div_ratio) if pd.notna(div_ratio) and div_ratio != 0 else 0
+                                log.info('股票 %s 股息率(Series): %.2f%%' % (stock, stock_factors[stock]['dividend_ratio']))
+                            
+                            if 'total_value' in stock_dividend.index:
+                                market_val = stock_dividend['total_value']
+                                stock_factors[stock]['market_value'] = float(market_val) if pd.notna(market_val) and market_val != 0 else float('inf')
+                                log.info('股票 %s 市值(Series): %.2f万元' % (stock, stock_factors[stock]['market_value']/10000))
+                        elif isinstance(stock_dividend, pd.DataFrame):
+                            # 如果是DataFrame，检查列
+                            if 'dividend_ratio' in stock_dividend.columns:
+                                div_ratio = stock_dividend['dividend_ratio'].iloc[0]
+                                if isinstance(div_ratio, str):
+                                    stock_factors[stock]['dividend_ratio'] = float(div_ratio.strip('%'))
+                                else:
+                                    stock_factors[stock]['dividend_ratio'] = float(div_ratio) if pd.notna(div_ratio) and div_ratio != 0 else 0
+                                log.info('股票 %s 股息率(DataFrame): %.2f%%' % (stock, stock_factors[stock]['dividend_ratio']))
+                            
+                            if 'total_value' in stock_dividend.columns:
+                                market_val = stock_dividend['total_value'].iloc[0]
+                                stock_factors[stock]['market_value'] = float(market_val) if pd.notna(market_val) and market_val != 0 else float('inf')
+                                log.info('股票 %s 市值(DataFrame): %.2f万元' % (stock, stock_factors[stock]['market_value']/10000))
+                    else:
+                        log.info('股票 %s 未找到股息数据' % stock)
+                else:
+                    log.info('股息数据为空，股票 %s 跳过股息率处理' % stock)
+                
+                # 3. 计算股息支付率（使用新的计算函数，需要同时传递股息率和市值数据）
+                # 合并dividend_data和market_data用于计算
+                combined_data = pd.DataFrame()
+                if not dividend_data.empty and not market_data.empty:
+                    try:
+                        # 尝试合并dividend_data和market_data
+                        if hasattr(dividend_data.index, 'levels') and hasattr(market_data.index, 'levels'):
+                            # 都是MultiIndex
+                            combined_data = pd.concat([dividend_data, market_data], axis=1)
+                        else:
+                            # 简单合并
+                            combined_data = pd.concat([dividend_data, market_data], axis=1)
+                    except Exception as e:
+                        log.error('合并股息和市值数据时出错: %s' % str(e))
+                        combined_data = dividend_data  # 使用dividend_data作为备选
+                
+                stock_factors[stock]['payout_ratio'] = calculate_payout_ratio(stock, financial_data, combined_data)
+                
+                # 4. 高管增持比例暂时设为0，因为需要额外的数据源
+                stock_factors[stock]['insider_holding'] = 0
+                
+                # 打印调试信息
+                log.info('股票%s因子数据汇总: 收盘价=%.2f, 股息率=%.2f%%, 市值=%.2f亿, 股息支付率=%.2f%%' % 
+                        (stock, stock_factors[stock]["close_price"], 
+                         stock_factors[stock]["dividend_ratio"],
+                         stock_factors[stock]["market_value"]/100000000,
+                         stock_factors[stock]["payout_ratio"]))
+                
+            except Exception as e:
+                log.error(f'处理股票{stock}的因子数据时发生错误: {str(e)}')
+                log.error(traceback.format_exc())
+                # 保持默认值，继续处理下一个股票
+                continue
+
+        # 对每个因子进行排序并分配分数
+        sorted_stocks = []
+        for stock in stock_pool:
+            total_score = (
+                -stock_factors[stock]['close_price'] +  # 收盘价从低到高
+                stock_factors[stock]['dividend_ratio'] +  # 股息率从高到低
+                stock_factors[stock]['payout_ratio'] +   # 股息支付率从大到小
+                stock_factors[stock]['insider_holding'] + # 高管增持比例从高到低
+                -stock_factors[stock]['market_value']    # 总市值从小到大
+            )
+            sorted_stocks.append((stock, total_score))
+            
+        # 根据总分排序
+        sorted_stocks.sort(key=lambda x: x[1], reverse=True)
+        
+        # 获取排序后的股票列表
+        stock_pool = [stock for stock, _ in sorted_stocks]
+        
+        log.info('多因子排序后的股票列表:')
+        for stock, score in sorted_stocks:
+            stock_info = get_stock_info([stock], ['stock_name'])[stock]
+            log.info(f"{stock}({stock_info['stock_name']}): 收盘价={stock_factors[stock]['close_price']:.2f}, "
+                    f"股息率={stock_factors[stock]['dividend_ratio']:.2f}%, "
+                    f"股息支付率={stock_factors[stock]['payout_ratio']:.2f}, "
+                    f"总市值={stock_factors[stock]['market_value']/100000000:.2f}亿")
+    
+    except Exception as e:
+        log.error(f'多因子排序过程中发生错误: {str(e)}')
+    
+    log.info('选股结果名称2: %s' % get_stock_info(stock_pool, ['stock_name']))
         
     # 这里可以添加您的交易逻辑
     # 例如：等权重分配资金到选中的股票
