@@ -114,92 +114,154 @@ def get_stock_pool(context):
 
         
     # 6. 剔除换手率最高的50%
-    log.info('开始换手率筛选，筛选前股票数量: %d' % len(valid_stocks))
+    log.info("==========开始换手率筛选==========")
+    log.info("输入股票数量: {}".format(len(valid_stocks)))
     
     try:
-        # 获取估值数据中的换手率
-        turnover_data = get_fundamentals(valid_stocks, 'valuation', fields=['turnover_rate'])
-        log.info('获取到的换手率数据类型: %s' % type(turnover_data))
-        log.info('获取到的换手率数据: %s' % str(turnover_data))
+        # 使用PTrade API获取估值数据中的换手率
+        turnover_data = get_fundamentals(valid_stocks, 'valuation', 
+                                       fields=['turnover_rate'])
         
         if turnover_data is None or len(turnover_data) == 0:
-            log.info('获取到的换手率数据为空')
+            log.warning('获取换手率数据为空，跳过换手率筛选')
             return []
             
         # 处理换手率数据
         turnovers = {}
+        invalid_data_count = 0
         
-        # 如果是DataFrame格式
-        if hasattr(turnover_data, 'iterrows'):
-            for index, row in turnover_data.iterrows():
-                try:
-                    stock = row.name if isinstance(row.name, str) else row['code']
-                    turnover_rate = row['turnover_rate']
-                    if isinstance(turnover_rate, str):
-                        turnover_rate = float(turnover_rate.strip('%'))
-                    if turnover_rate > 0:
-                        turnovers[stock] = turnover_rate
-                        # 正确log
-                        # log.info('股票 %s 的换手率: %.2f%%' % (stock, turnover_rate))
-                    else:
-                        log.info('股票 %s 的换手率为0' % stock)
-                except Exception as e:
-                    log.info('处理股票换手率时出错: %s' % str(e))
-                    continue
-        # 如果是字典格式
-        elif isinstance(turnover_data, dict):
+        # 根据返回数据格式处理
+        if isinstance(turnover_data, dict):
             for stock in valid_stocks:
                 try:
                     if stock in turnover_data:
-                        turnover_rate = turnover_data[stock]['turnover_rate']
+                        stock_data = turnover_data[stock]
+                        turnover_rate = stock_data.get('turnover_rate', '0%')
+                        
+                        # 处理带%的字符串格式
                         if isinstance(turnover_rate, str):
                             turnover_rate = float(turnover_rate.strip('%'))
+                        else:
+                            turnover_rate = float(turnover_rate)
+                            
                         if turnover_rate > 0:
                             turnovers[stock] = turnover_rate
-                            # 正确 log
-                            # log.info('股票 %s 的换手率: %.2f%%' % (stock, turnover_rate))
+                            log.debug("股票 {} 换手率: {:.2f}%".format(stock, turnover_rate))
                         else:
-                            log.info('股票 %s 的换手率为0' % stock)
+                            log.debug("股票 {} 换手率为0，跳过".format(stock))
+                            invalid_data_count += 1
                     else:
-                        log.info('股票 %s 没有换手率数据' % stock)
+                        log.warning("股票 {} 未找到换手率数据".format(stock))
+                        invalid_data_count += 1
+                        
                 except Exception as e:
-                    log.info('处理股票 %s 换手率时出错: %s' % (stock, str(e)))
+                    log.error("处理股票 {} 换手率时出错: {}".format(stock, str(e)))
+                    invalid_data_count += 1
                     continue
-        else:
-            log.info('不支持的换手率数据格式: %s' % type(turnover_data))
-            return []
+                    
+        else:  # DataFrame格式
+            for stock in valid_stocks:
+                try:
+                    # 根据API文档，返回的DataFrame中股票代码字段是secu_code
+                    if hasattr(turnover_data, 'columns') and 'secu_code' in turnover_data.columns:
+                        stock_data = turnover_data[turnover_data['secu_code'] == stock]
+                    else:
+                        # 备用方案：使用索引查找
+                        stock_data = turnover_data[turnover_data.index == stock] if stock in turnover_data.index else pd.DataFrame()
+                    
+                    if stock_data.empty:
+                        log.warning("股票 {} 未找到换手率数据".format(stock))
+                        invalid_data_count += 1
+                        continue
+                        
+                    if 'turnover_rate' not in stock_data.columns:
+                        log.warning("股票 {} 缺少换手率字段".format(stock))
+                        invalid_data_count += 1
+                        continue
+                        
+                    turnover_rate = stock_data['turnover_rate'].iloc[0]
+                    
+                    # 处理带%的字符串格式
+                    if isinstance(turnover_rate, str):
+                        turnover_rate = float(turnover_rate.strip('%'))
+                    else:
+                        turnover_rate = float(turnover_rate)
+                        
+                    if turnover_rate > 0:
+                        turnovers[stock] = turnover_rate
+                        # log.debug("股票 {} 换手率: {:.2f}%".format(stock, turnover_rate))
+                    else:
+                        log.debug("股票 {} 换手率为0，跳过".format(stock))
+                        invalid_data_count += 1
+                        
+                except Exception as e:
+                    log.error("处理股票 {} 换手率时出错: {}".format(stock, str(e)))
+                    invalid_data_count += 1
+                    continue
                 
         if not turnovers:
-            log.info('没有有效的换手率数据')
+            log.warning('没有有效的换手率数据，跳过换手率筛选')
             return []
         
-        log.info('成功获取换手率数据的股票数量: %d' % len(turnovers))
+        log.info('成功获取换手率数据的股票数量: {}, 无效数据数量: {}'.format(len(turnovers), invalid_data_count))
         
-        # 计算换手率的中位数作为阈值
-        threshold = np.median(list(turnovers.values()))
-        log.info('换手率中位数阈值: %.2f%%' % threshold)
+        # 统计换手率分布
+        turnover_values = list(turnovers.values())
+        log.info("换手率统计 - 最小值: {:.2f}%, 最大值: {:.2f}%, 平均值: {:.2f}%".format(
+            min(turnover_values), max(turnover_values), sum(turnover_values)/len(turnover_values)))
         
-        # 找出换手率高于中位数的股票
-        high_turnover_stocks = [(stock, turnovers[stock]) for stock in turnovers if turnovers[stock] > threshold]
-        high_turnover_stocks.sort(key=lambda x: x[1], reverse=True)  # 按换手率从高到低排序
+        # 方法：直接按换手率排序，剔除最高的50%
+        # 将股票按换手率从高到低排序
+        sorted_stocks = sorted(turnovers.items(), key=lambda x: x[1], reverse=True)
+        log.info('股票总数: {}'.format(len(sorted_stocks)))
         
+        # 计算要剔除的股票数量（最高的50%）
+        remove_count = len(sorted_stocks) // 2
+        log.info('计划剔除换手率最高的 {} 只股票（占比 {:.1f}%）'.format(
+            remove_count, remove_count * 100.0 / len(sorted_stocks)))
+        
+        # 获取被剔除的股票（换手率最高的50%）
+        high_turnover_stocks = sorted_stocks[:remove_count]
+        
+        # 获取保留的股票（换手率较低的50%）
+        keep_stocks = sorted_stocks[remove_count:]
+        
+        # 记录阈值（最后一个被剔除股票的换手率）
         if high_turnover_stocks:
-            log.info('换手率最高的几只股票:')
-            for stock, rate in high_turnover_stocks[:5]:  # 显示前5只换手率最高的
-                log.info('  %s: %.2f%%' % (stock, rate))
+            threshold = high_turnover_stocks[-1][1]  # 最后一个被剔除股票的换手率
+            log.info('换手率剔除阈值: {:.2f}%（高于此值的股票被剔除）'.format(threshold))
+        else:
+            threshold = 0
+            log.info('无股票被剔除')
         
-        # 保留换手率低于等于中位数的股票
-        valid_stocks = [stock for stock in valid_stocks if stock in turnovers and turnovers[stock] <= threshold]
+        # 保留的股票列表
+        filtered_stocks = [stock for stock, rate in keep_stocks if stock in valid_stocks]
         
-        if not valid_stocks:
-            log.info('换手率筛选后股票池为空')
+        # 记录被剔除的股票
+        if high_turnover_stocks:
+            log.info('以下 {} 只股票因换手率过高被剔除:'.format(len(high_turnover_stocks)))
+            for stock, rate in high_turnover_stocks[:10]:  # 只显示前10只
+                log.info('  {}: 换手率 {:.2f}%'.format(stock, rate))
+            if len(high_turnover_stocks) > 10:
+                log.info('  ... 还有 {} 只股票被剔除'.format(len(high_turnover_stocks) - 10))
+        
+        if not filtered_stocks:
+            log.warning('换手率筛选后股票池为空')
             return []
         
-        log.info('换手率筛选后数量: %d' % len(valid_stocks))
-        # log.info('换手率筛选后股票: %s' % valid_stocks)
+        log.info('换手率筛选完成 - 剔除股票数: {}, 保留股票数: {}'.format(
+            len(high_turnover_stocks), len(filtered_stocks)))
+        log.info("==========换手率筛选结束==========")
+        
+        # 对筛选后的股票按股票代码前6位数字排序
+        filtered_stocks = sorted(filtered_stocks, key=lambda x: x[:6])
+        log.info('股票列表已按代码前6位排序，保留股票: {}'.format(filtered_stocks))
+        
+        valid_stocks = filtered_stocks
         
     except Exception as e:
-        log.error('获取换手率数据时发生错误: %s' % str(e))
+        log.error('获取换手率数据时发生错误: {}'.format(str(e)))
+        log.error('错误详情: {}'.format(traceback.format_exc()))
         return []
         
     # 7. 20日乖离率10至90%的剔除 
@@ -391,7 +453,7 @@ def get_stock_pool(context):
     try:
         # 使用PTrade API获取资产负债表数据
         debt_data = get_fundamentals(valid_stocks, 'balance_statement', 
-                                   fields=['total_liability', 'total_assets'], report_types='1')
+                                   fields=['total_liability', 'total_assets'])
         
         if debt_data is None or len(debt_data) == 0:
             log.warning('获取资产负债表数据为空，跳过资产负债率筛选')
