@@ -385,43 +385,103 @@ def get_stock_pool(context):
         return []
         
     # 10. 资产负债率大于70%的剔除
+    log.info("==========开始资产负债率筛选==========")
+    log.info("输入股票数量: {}".format(len(valid_stocks)))
+    
     try:
-        # 获取资产负债表数据
-        debt_data = get_fundamentals(valid_stocks, 'debt_paying_ability', 
-                                   fields=['debt_equity_ratio'])  # 使用偿债能力表中的产权比率
+        # 使用PTrade API获取资产负债表数据
+        debt_data = get_fundamentals(valid_stocks, 'balance_statement', 
+                                   fields=['total_liability', 'total_assets'], report_types='1')
         
         if debt_data is None or len(debt_data) == 0:
-            log.info('获取资产负债率数据为空')
+            log.warning('获取资产负债表数据为空，跳过资产负债率筛选')
             return []
             
         filtered_stocks = []
-        problematic_stocks = []
+        removed_stocks = []
+        debt_ratios = []
         
         for stock in valid_stocks:
             try:
+                # 根据返回数据格式处理
                 if isinstance(debt_data, dict):
                     if stock in debt_data:
-                        ratio = float(debt_data[stock]['debt_equity_ratio'])
-                        if ratio <= 70:  # 产权比率<=70%
-                            filtered_stocks.append(stock)
-                        else:
-                            problematic_stocks.append((stock, ratio))
+                        stock_data = debt_data[stock]
+                        total_liability = float(stock_data.get('total_liability', 0))
+                        total_assets = float(stock_data.get('total_assets', 1))  # 避免除零
+                    else:
+                        log.warning("股票 {} 未找到资产负债表数据，跳过".format(stock))
+                        continue
                 else:  # DataFrame格式
-                    stock_data = debt_data[debt_data.index.get_level_values('secu_code') == stock]
-                    if not stock_data.empty:
-                        ratio = float(stock_data['debt_equity_ratio'].iloc[0])
-                        if ratio <= 70:
-                            filtered_stocks.append(stock)
-                        else:
-                            problematic_stocks.append((stock, ratio))
-            except Exception as e:
-                log.info('处理股票 %s 资产负债率时出错: %s' % (stock, str(e)))
-                continue
+                    # 根据API文档，返回的DataFrame中股票代码字段是secu_code
+                    if 'secu_code' in debt_data.columns:
+                        stock_data = debt_data[debt_data['secu_code'] == stock]
+                    else:
+                        # 如果没有secu_code字段，尝试使用索引
+                        stock_data = debt_data[debt_data.index == stock] if stock in debt_data.index else pd.DataFrame()
+                    
+                    if stock_data.empty:
+                        log.warning("股票 {} 未找到资产负债表数据，跳过".format(stock))
+                        continue
+                    
+                    # 检查字段是否存在
+                    if 'total_liability' not in stock_data.columns or 'total_assets' not in stock_data.columns:
+                        log.warning("股票 {} 缺少必要的财务字段，跳过".format(stock))
+                        continue
+                        
+                    total_liability = float(stock_data['total_liability'].iloc[0])
+                    total_assets = float(stock_data['total_assets'].iloc[0])
                 
-        # if problematic_stocks:
-        #     log.info('以下股票因资产负债率过高被剔除:')
-        #     for stock, ratio in problematic_stocks:
-        #         log.info('  %s: 资产负债率 %.2f%%' % (stock, ratio))
+                # 计算资产负债率
+                if total_assets > 0:
+                    debt_ratio = (total_liability / total_assets) * 100
+                    debt_ratios.append(debt_ratio)
+                    
+                    if debt_ratio <= 70:  # 资产负债率<=70%
+                        filtered_stocks.append(stock)
+                        log.debug(f"股票 {stock} 资产负债率 {debt_ratio:.2f}% <= 70%，资产负债分别为 {total_liability:.2f}万, {total_assets:.2f}万 保留 ")
+                    else:
+                        removed_stocks.append((stock, debt_ratio))
+                        log.debug("股票 {} 资产负债率 {:.2f}% > 70%，剔除".format(stock, debt_ratio))
+                else:
+                    log.warning("股票 {} 总资产为0或负数，跳过".format(stock))
+                    
+            except Exception as e:
+                log.error('处理股票 {} 资产负债率时出错: {}'.format(stock, str(e)))
+                continue
+        
+        # 统计信息
+        if debt_ratios:
+            log.info("资产负债率统计 - 最小值: {:.2f}%, 最大值: {:.2f}%, 平均值: {:.2f}%".format(
+                min(debt_ratios), max(debt_ratios), sum(debt_ratios)/len(debt_ratios)))
+        
+        # 记录被剔除的股票
+        if removed_stocks:
+            log.info('以下 {} 只股票因资产负债率过高被剔除:'.format(len(removed_stocks)))
+            for stock, ratio in removed_stocks[:10]:  # 只显示前10只
+                log.info('  {}: 资产负债率 {:.2f}%'.format(stock, ratio))
+            if len(removed_stocks) > 10:
+                log.info('  ... 还有 {} 只股票被剔除'.format(len(removed_stocks) - 10))
+        
+        if not filtered_stocks:
+            log.warning('资产负债率筛选后股票池为空')
+            return []
+        
+        log.info('资产负债率筛选完成 - 剔除股票数: {}, 保留股票数: {}'.format(
+            len(removed_stocks), len(filtered_stocks)))
+        log.info("==========资产负债率筛选结束==========")
+        
+        valid_stocks = filtered_stocks
+        
+    except Exception as e:
+        log.error('获取资产负债率数据时发生错误: {}'.format(str(e)))
+        log.error('错误详情: {}'.format(traceback.format_exc()))
+        return []
+                
+        if problematic_stocks:
+            log.info('以下 {} 只股票因资产负债率过高被剔除:'.format(len(removed_stocks)))
+            for stock, ratio in problematic_stocks:
+                log.info('  %s: 资产负债率 %.2f%%' % (stock, ratio))
                 
         valid_stocks = filtered_stocks
         
@@ -430,10 +490,6 @@ def get_stock_pool(context):
             return []
         
         log.info('资产负债率筛选后数量: %d' % len(valid_stocks))
-        
-    except Exception as e:
-        log.error('获取资产负债率数据时发生错误: %s' % str(e))
-        return []
         
     # 11. 剔除收盘价最高的10%
     try:
