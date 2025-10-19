@@ -43,6 +43,9 @@ def initialize(context):
     # 记录当天是否已执行选股，避免同日重复执行
     context.last_buy_date = None
     
+    # 交易结束日期设置（写死的日期）
+    context.trading_end_date = datetime.date(2024, 12, 30)  # 设置交易结束日期为2024年12月30日（周一）
+    
     # 初始化全局变量
     g.recent_orders = []  # 用于跟踪最近的订单
 
@@ -773,10 +776,38 @@ def handle_data(context, data):
     - 保留重复的股票（不卖出）
     - 卖出上周一不重复的股票
     - 买入本周一新增的股票
+    
+    特殊逻辑：
+    - 如果到达交易结束日期，执行清仓操作
+    - 如果交易结束日期是周一，不执行买入操作，只执行清仓
     """
+    # 检查是否到达交易结束日期
+    today = context.current_dt.date()
+    trading_end_date = getattr(context, 'trading_end_date', None)
+    
+    if trading_end_date and today >= trading_end_date:
+        log.info('已到达交易结束日期 %s，执行清仓操作' % trading_end_date)
+        # 执行清仓操作
+        try:
+            current_positions = get_positions()
+            if current_positions:
+                log.info('开始清仓，当前持仓: %s' % list(current_positions.keys()))
+                for pos_key, position in current_positions.items():
+                    if hasattr(position, 'total_amount') and position.total_amount > 0:
+                        order_target_percent(pos_key, 0)
+                        log.info('清仓股票: %s' % pos_key)
+                    elif hasattr(position, 'amount') and position.amount > 0:
+                        order_target_percent(pos_key, 0)
+                        log.info('清仓股票: %s' % pos_key)
+                log.info('清仓操作完成')
+            else:
+                log.info('当前无持仓，无需清仓')
+        except Exception as e:
+            log.error('清仓操作失败: %s' % str(e))
+        return
+    
     # 仅在每周一执行选股和调仓
     try:
-        today = context.current_dt.date()
         current_time = context.current_dt.time()
         weekday = context.current_dt.weekday()
         weekly_buy_weekday = getattr(context, 'weekly_buy_weekday', 0)
