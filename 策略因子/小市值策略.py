@@ -782,18 +782,14 @@ def handle_data(context, data):
         weekly_buy_weekday = getattr(context, 'weekly_buy_weekday', 0)
         
         if weekday != weekly_buy_weekday:
-            # 该日志在非选股日会因多次调用重复打印，这里做按日去重
+            # 当天首次提示，后续同日不再重复打印
             last_log_date = getattr(context, 'last_non_select_log_date', None)
             if last_log_date != today:
                 log.info('非选股日(weekday=%d)，跳过选股与调仓' % weekday)
-                # 记录当日已打印，避免重复输出
                 try:
                     context.last_non_select_log_date = today
                 except Exception:
                     pass
-            else:
-                # 当天再次进入则降级为debug，减少日志噪音
-                log.debug('非选股日(weekday=%d)，跳过选股与调仓' % weekday)
             return
             
         # 检查是否为开盘后5分钟（A股开盘时间为9:30，开盘后5分钟为9:35）
@@ -801,11 +797,18 @@ def handle_data(context, data):
         buy_time = datetime.time(9, 35)  # 开盘后5分钟
         
         if current_time < buy_time:
-            log.info('当前时间%s未到买入时间%s，跳过交易' % (current_time, buy_time))
+            # 当天首次提示，后续同日不再重复打印
+            last_log_date = getattr(context, 'last_not_buy_time_log_date', None)
+            if last_log_date != today:
+                log.info('当前时间%s未到买入时间%s，跳过交易' % (current_time, buy_time))
+                try:
+                    context.last_not_buy_time_log_date = today
+                except Exception:
+                    pass
             return
             
         if getattr(context, 'last_buy_date', None) == today:
-            # 当天已完成选股会频繁进入此分支，按日去重：首次info，后续debug
+            # 当天首次提示，后续同日不再重复打印
             last_log_date = getattr(context, 'last_already_selected_log_date', None)
             if last_log_date != today:
                 log.info('今日已完成周一选股，跳过重复执行')
@@ -813,8 +816,6 @@ def handle_data(context, data):
                     context.last_already_selected_log_date = today
                 except Exception:
                     pass
-            else:
-                log.debug('今日已完成周一选股，跳过重复执行')
             return
     except Exception as e:
         log.warning('选股日判断异常: %s，允许本次继续执行' % str(e))
