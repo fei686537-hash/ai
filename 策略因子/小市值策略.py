@@ -44,7 +44,7 @@ def initialize(context):
     context.last_buy_date = None
     
     # 交易结束日期设置（写死的日期）
-    context.trading_end_date = datetime.date(2024, 12, 30)  # 设置交易结束日期为2024年12月30日（周一）
+    context.trading_end_date = datetime.date(2025, 1, 13)  # 设置交易结束日期为2024年12月30日（周一）
     
     # 初始化全局变量
     g.recent_orders = []  # 用于跟踪最近的订单
@@ -181,185 +181,85 @@ def get_stock_pool(context):
     log.info('振幅筛选后数量: %d' % len(valid_stocks))
 
         
-    # 6. 剔除换手率最高的50%
-    log.info("==========开始换手率筛选==========")
-    log.info("输入股票数量: {}".format(len(valid_stocks)))
-    
-    try:
-        # 使用PTrade API获取估值数据中的换手率
-        turnover_data = get_fundamentals(valid_stocks, 'valuation', 
-                                       fields=['turnover_rate'])
-        
-        if turnover_data is None or len(turnover_data) == 0:
-            log.warning('获取换手率数据为空，跳过换手率筛选')
-            return []
-            
-        # 处理换手率数据
-        turnovers = {}
-        invalid_data_count = 0
-        
-        # 根据返回数据格式处理
-        if isinstance(turnover_data, dict):
-            for stock in valid_stocks:
-                try:
-                    if stock in turnover_data:
-                        stock_data = turnover_data[stock]
-                        turnover_rate = stock_data.get('turnover_rate', '0%')
-                        
-                        # 处理带%的字符串格式
-                        if isinstance(turnover_rate, str):
-                            turnover_rate = float(turnover_rate.strip('%'))
-                        else:
-                            turnover_rate = float(turnover_rate)
-                            
-                        if turnover_rate > 0:
-                            turnovers[stock] = turnover_rate
-                            # log.debug("股票 {} 换手率: {:.2f}%".format(stock, turnover_rate))
-                        else:
-                            log.debug("股票 {} 换手率为0，跳过".format(stock))
-                            invalid_data_count += 1
-                    else:
-                        log.warning("股票 {} 未找到换手率数据".format(stock))
-                        invalid_data_count += 1
-                        
-                except Exception as e:
-                    log.error("处理股票 {} 换手率时出错: {}".format(stock, str(e)))
-                    invalid_data_count += 1
-                    continue
-                    
-        else:  # DataFrame格式
-            for stock in valid_stocks:
-                try:
-                    # 根据API文档，返回的DataFrame中股票代码字段是secu_code
-                    if hasattr(turnover_data, 'columns') and 'secu_code' in turnover_data.columns:
-                        stock_data = turnover_data[turnover_data['secu_code'] == stock]
-                    else:
-                        # 备用方案：使用索引查找
-                        stock_data = turnover_data[turnover_data.index == stock] if stock in turnover_data.index else pd.DataFrame()
-                    
-                    if stock_data.empty:
-                        log.warning("股票 {} 未找到换手率数据".format(stock))
-                        invalid_data_count += 1
-                        continue
-                        
-                    if 'turnover_rate' not in stock_data.columns:
-                        log.warning("股票 {} 缺少换手率字段".format(stock))
-                        invalid_data_count += 1
-                        continue
-                        
-                    turnover_rate = stock_data['turnover_rate'].iloc[0]
-                    
-                    # 处理带%的字符串格式
-                    if isinstance(turnover_rate, str):
-                        turnover_rate = float(turnover_rate.strip('%'))
-                    else:
-                        turnover_rate = float(turnover_rate)
-                        
-                    if turnover_rate > 0:
-                        turnovers[stock] = turnover_rate
-                        # log.debug("股票 {} 换手率: {:.2f}%".format(stock, turnover_rate))
-                    else:
-                        log.debug("股票 {} 换手率为0，跳过".format(stock))
-                        invalid_data_count += 1
-                        
-                except Exception as e:
-                    log.error("处理股票 {} 换手率时出错: {}".format(stock, str(e)))
-                    invalid_data_count += 1
-                    continue
-                
-        if not turnovers:
-            log.warning('没有有效的换手率数据，跳过换手率筛选')
-            return []
-        
-        log.info('成功获取换手率数据的股票数量: {}, 无效数据数量: {}'.format(len(turnovers), invalid_data_count))
-        
-        # 统计换手率分布
-        turnover_values = list(turnovers.values())
-        log.info("换手率统计 - 最小值: {:.2f}%, 最大值: {:.2f}%, 平均值: {:.2f}%".format(
-            min(turnover_values), max(turnover_values), sum(turnover_values)/len(turnover_values)))
-        
-        # 方法：直接按换手率排序，剔除最高的50%
-        # 将股票按换手率从高到低排序
-        sorted_stocks = sorted(turnovers.items(), key=lambda x: x[1], reverse=True)
-        # log.info('股票总数: {}'.format(len(sorted_stocks)))
-        
-        # 计算要剔除的股票数量（最高的50%）
-        remove_count = len(sorted_stocks) // 2
-        # log.info('计划剔除换手率最高的 {} 只股票（占比 {:.1f}%）'.format(
-        #     remove_count, remove_count * 100.0 / len(sorted_stocks)))
-        
-        # 获取被剔除的股票（换手率最高的50%）
-        high_turnover_stocks = sorted_stocks[:remove_count]
-        
-        # 获取保留的股票（换手率较低的50%）
-        keep_stocks = sorted_stocks[remove_count:]
-        
-        # 记录阈值（最后一个被剔除股票的换手率）
-        if high_turnover_stocks:
-            threshold = high_turnover_stocks[-1][1]  # 最后一个被剔除股票的换手率
-            log.info('换手率剔除阈值: {:.2f}%（高于此值的股票被剔除）'.format(threshold))
-        else:
-            threshold = 0
-            log.info('无股票被剔除')
-        
-        # 保留的股票列表
-        filtered_stocks = [stock for stock, rate in keep_stocks if stock in valid_stocks]
-        
-        # 记录被剔除的股票
-        if high_turnover_stocks:
-            log.info('以下 {} 只股票因换手率过高被剔除:'.format(len(high_turnover_stocks)))
-            for stock, rate in high_turnover_stocks[:10]:  # 只显示前10只
-                log.info('  {}: 换手率 {:.2f}%'.format(stock, rate))
-            if len(high_turnover_stocks) > 10:
-                log.info('  ... 还有 {} 只股票被剔除'.format(len(high_turnover_stocks) - 10))
-        
-        if not filtered_stocks:
-            log.warning('换手率筛选后股票池为空')
-            return []
-        
-        log.info('换手率筛选完成 - 剔除股票数: {}, 保留股票数: {}'.format(
-            len(high_turnover_stocks), len(filtered_stocks)))
-        log.info("==========换手率筛选结束==========")
-        
-        # 对筛选后的股票按股票代码前6位数字排序
-        filtered_stocks = sorted(filtered_stocks, key=lambda x: x[:6])
-        # log.info('股票列表已按代码前6位排序，保留股票: {}'.format(filtered_stocks))
-        
-        valid_stocks = filtered_stocks
-        
-    except Exception as e:
-        log.error('获取换手率数据时发生错误: {}'.format(str(e)))
-        log.error('错误详情: {}'.format(traceback.format_exc()))
-        return []
+
         
     # 7. 20日乖离率10至90%的剔除 
-    price_data = get_history(20, '1d', ['close'], security_list=valid_stocks)
-    current_data = get_history(1, '1d', ['close'], security_list=valid_stocks)
+    log.info('开始乖离率筛选，输入股票数量: %d' % len(valid_stocks))
+    
+    # 获取价格数据，增加异常保护
+    try:
+        price_data = get_history(20, '1d', ['close'], security_list=valid_stocks)
+        current_data = get_history(1, '1d', ['close'], security_list=valid_stocks)
+        
+        if price_data is None or getattr(price_data, 'empty', False):
+            log.warning('无法获取20日历史价格数据，跳过乖离率筛选')
+            return valid_stocks
+        if current_data is None or getattr(current_data, 'empty', False):
+            log.warning('无法获取当前价格数据，跳过乖离率筛选')
+            return valid_stocks
+        
+        # 尽量给出数据量级，便于排查
+        try:
+            log.info('成功获取价格数据，20日数据行数: %d，当前数据行数: %d' % (len(price_data), len(current_data)))
+        except Exception:
+            pass
+    except Exception as e:
+        log.error('获取价格数据时发生错误: %s' % str(e))
+        return valid_stocks
+    
+    # 计算乖离率
     bias = {}
+    failed_stocks = []
     for stock in valid_stocks:
         try:
-            ma20 = price_data.query(f'code == "{stock}"')['close'].mean()
-            current_price = current_data.query(f'code == "{stock}"')['close'].iloc[0]
-            if ma20 > 0:
+            stock_price_data = price_data.query('code == "%s"' % stock)['close']
+            stock_current_data = current_data.query('code == "%s"' % stock)['close']
+            if getattr(stock_price_data, 'empty', False) or getattr(stock_current_data, 'empty', False):
+                failed_stocks.append((stock, '数据为空'))
+                continue
+            ma20 = stock_price_data.mean()
+            current_price = stock_current_data.iloc[0]
+            if ma20 > 0 and not np.isnan(ma20) and not np.isnan(current_price):
                 bias[stock] = (current_price - ma20) / ma20 * 100
-        except:
+            else:
+                failed_stocks.append((stock, '无效数据: ma20=%s, current=%s' % (ma20, current_price)))
+        except Exception as e:
+            failed_stocks.append((stock, '计算异常: %s' % str(e)))
             continue
-            
+    
+    if failed_stocks:
+        log.info('乖离率计算失败的股票数量: %d' % len(failed_stocks))
+        # 可按需打开详细日志
+        # log.debug('失败详情: %s' % failed_stocks[:5])
+    
     if not bias:
-        return []
-        
+        log.warning('所有股票的乖离率计算都失败，返回原股票列表')
+        return valid_stocks
+    
     bias_values = list(bias.values())
-    lower = np.percentile(bias_values, 10)
-    upper = np.percentile(bias_values, 90)
+    # 根据样本量动态选择分位范围
+    if len(bias_values) < 10:
+        lower = np.percentile(bias_values, 5)
+        upper = np.percentile(bias_values, 95)
+        log.info('股票数量较少(%d只)，放宽乖离率筛选条件至5%%-95%%' % len(bias_values))
+    else:
+        lower = np.percentile(bias_values, 10)
+        upper = np.percentile(bias_values, 90)
+    
+    try:
+        log.info('乖离率筛选范围: %.2f%% 到 %.2f%%' % (lower, upper))
+    except Exception:
+        pass
+    
     valid_stocks = [stock for stock in valid_stocks if stock in bias and lower <= bias[stock] <= upper]
     
     if not valid_stocks:
-        log.info('乖离率筛选后股票池为空')
-        return []
+        log.warning('乖离率筛选后股票池为空，可能筛选条件过于严格')
+        # 回退：至少返回有乖离率数据的股票，避免空列表
+        valid_stocks = list(bias.keys())
+        log.info('返回所有有乖离率数据的股票，数量: %d' % len(valid_stocks))
     
     log.info('乖离率筛选后数量: %d' % len(valid_stocks))
-    # 正确log 
-    # log.info('乖离率筛选后股票: %s' % valid_stocks)
         
     # 8. TTM股息等于0的剔除
     try:
@@ -620,7 +520,6 @@ def get_stock_pool(context):
             return []
         
         log.info('资产负债率筛选后数量: %d' % len(valid_stocks))
-        
     # 11. 剔除收盘价最高的10%
     try:
         price_data = get_history(1, '1d', ['close'], security_list=valid_stocks)
@@ -712,6 +611,159 @@ def get_stock_pool(context):
         log.error('获取市值数据时发生错误: %s' % str(e))
         return []
     
+# 6. 剔除换手率最高的50%
+    log.info("==========开始换手率筛选==========")
+    log.info("输入股票数量: {}".format(len(valid_stocks)))
+    
+    try:
+        # 使用PTrade API获取估值数据中的换手率
+        turnover_data = get_fundamentals(valid_stocks, 'valuation', 
+                                       fields=['turnover_rate'])
+        
+        if turnover_data is None or len(turnover_data) == 0:
+            log.warning('获取换手率数据为空，跳过换手率筛选')
+            return []
+            
+        # 处理换手率数据
+        turnovers = {}
+        invalid_data_count = 0
+        
+        # 根据返回数据格式处理
+        if isinstance(turnover_data, dict):
+            for stock in valid_stocks:
+                try:
+                    if stock in turnover_data:
+                        stock_data = turnover_data[stock]
+                        turnover_rate = stock_data.get('turnover_rate', '0%')
+                        
+                        # 处理带%的字符串格式
+                        if isinstance(turnover_rate, str):
+                            turnover_rate = float(turnover_rate.strip('%'))
+                        else:
+                            turnover_rate = float(turnover_rate)
+                            
+                        if turnover_rate > 0:
+                            turnovers[stock] = turnover_rate
+                            # log.debug("股票 {} 换手率: {:.2f}%".format(stock, turnover_rate))
+                        else:
+                            log.debug("股票 {} 换手率为0，跳过".format(stock))
+                            invalid_data_count += 1
+                    else:
+                        log.warning("股票 {} 未找到换手率数据".format(stock))
+                        invalid_data_count += 1
+                        
+                except Exception as e:
+                    log.error("处理股票 {} 换手率时出错: {}".format(stock, str(e)))
+                    invalid_data_count += 1
+                    continue
+                    
+        else:  # DataFrame格式
+            for stock in valid_stocks:
+                try:
+                    # 根据API文档，返回的DataFrame中股票代码字段是secu_code
+                    if hasattr(turnover_data, 'columns') and 'secu_code' in turnover_data.columns:
+                        stock_data = turnover_data[turnover_data['secu_code'] == stock]
+                    else:
+                        # 备用方案：使用索引查找
+                        stock_data = turnover_data[turnover_data.index == stock] if stock in turnover_data.index else pd.DataFrame()
+                    
+                    if stock_data.empty:
+                        log.warning("股票 {} 未找到换手率数据".format(stock))
+                        invalid_data_count += 1
+                        continue
+                        
+                    if 'turnover_rate' not in stock_data.columns:
+                        log.warning("股票 {} 缺少换手率字段".format(stock))
+                        invalid_data_count += 1
+                        continue
+                        
+                    turnover_rate = stock_data['turnover_rate'].iloc[0]
+                    
+                    # 处理带%的字符串格式
+                    if isinstance(turnover_rate, str):
+                        turnover_rate = float(turnover_rate.strip('%'))
+                    else:
+                        turnover_rate = float(turnover_rate)
+                        
+                    if turnover_rate > 0:
+                        turnovers[stock] = turnover_rate
+                        # log.debug("股票 {} 换手率: {:.2f}%".format(stock, turnover_rate))
+                    else:
+                        log.debug("股票 {} 换手率为0，跳过".format(stock))
+                        invalid_data_count += 1
+                        
+                except Exception as e:
+                    log.error("处理股票 {} 换手率时出错: {}".format(stock, str(e)))
+                    invalid_data_count += 1
+                    continue
+                
+        if not turnovers:
+            log.warning('没有有效的换手率数据，跳过换手率筛选')
+            return []
+        
+        log.info('成功获取换手率数据的股票数量: {}, 无效数据数量: {}'.format(len(turnovers), invalid_data_count))
+        
+        # 统计换手率分布
+        turnover_values = list(turnovers.values())
+        log.info("换手率统计 - 最小值: {:.2f}%, 最大值: {:.2f}%, 平均值: {:.2f}%".format(
+            min(turnover_values), max(turnover_values), sum(turnover_values)/len(turnover_values)))
+        
+        # 方法：直接按换手率排序，剔除最高的50%
+        # 将股票按换手率从高到低排序
+        sorted_stocks = sorted(turnovers.items(), key=lambda x: x[1], reverse=True)
+        # log.info('股票总数: {}'.format(len(sorted_stocks)))
+        
+        # 计算要剔除的股票数量（最高的50%）
+        remove_count = len(sorted_stocks) // 2
+        # log.info('计划剔除换手率最高的 {} 只股票（占比 {:.1f}%）'.format(
+        #     remove_count, remove_count * 100.0 / len(sorted_stocks)))
+        
+        # 获取被剔除的股票（换手率最高的50%）
+        high_turnover_stocks = sorted_stocks[:remove_count]
+        
+        # 获取保留的股票（换手率较低的50%）
+        keep_stocks = sorted_stocks[remove_count:]
+        
+        # 记录阈值（最后一个被剔除股票的换手率）
+        if high_turnover_stocks:
+            threshold = high_turnover_stocks[-1][1]  # 最后一个被剔除股票的换手率
+            log.info('换手率剔除阈值: {:.2f}%（高于此值的股票被剔除）'.format(threshold))
+        else:
+            threshold = 0
+            log.info('无股票被剔除')
+        
+        # 保留的股票列表
+        filtered_stocks = [stock for stock, rate in keep_stocks if stock in valid_stocks]
+        
+        # 记录被剔除的股票
+        if high_turnover_stocks:
+            log.info('以下 {} 只股票因换手率过高被剔除:'.format(len(high_turnover_stocks)))
+            for stock, rate in high_turnover_stocks[:10]:  # 只显示前10只
+                log.info('  {}: 换手率 {:.2f}%'.format(stock, rate))
+            if len(high_turnover_stocks) > 10:
+                log.info('  ... 还有 {} 只股票被剔除'.format(len(high_turnover_stocks) - 10))
+        
+        if not filtered_stocks:
+            log.warning('换手率筛选后股票池为空')
+            return []
+        
+        log.info('换手率筛选完成 - 剔除股票数: {}, 保留股票数: {}'.format(
+            len(high_turnover_stocks), len(filtered_stocks)))
+        log.info("==========换手率筛选结束==========")
+        
+        # 对筛选后的股票按股票代码前6位数字排序
+        filtered_stocks = sorted(filtered_stocks, key=lambda x: x[:6])
+        # log.info('股票列表已按代码前6位排序，保留股票: {}'.format(filtered_stocks))
+        
+        valid_stocks = filtered_stocks
+        
+    except Exception as e:
+        log.error('获取换手率数据时发生错误: {}'.format(str(e)))
+        log.error('错误详情: {}'.format(traceback.format_exc()))
+        return []
+        
+    log.info('最终筛选后数量: %d' % len(valid_stocks))
+    # log.info('最终筛选后股票: %s' % valid_stocks) 
     # 13. 剔除科创板、创业板、北交所、ST
     try:
         stock_info = get_stock_info(valid_stocks, ['stock_name'])
@@ -761,13 +813,16 @@ def get_stock_pool(context):
                 
         valid_stocks = filtered_stocks
     
-        log.info('最终筛选后数量: %d' % len(valid_stocks))
-        # log.info('最终筛选后股票: %s' % valid_stocks)
+        log.info('科创板等剔除后数量: %d' % len(valid_stocks))
+        # log.info('科创板等剔除后股票: %s' % valid_stocks)
         
-        return valid_stocks
     except Exception as e:
-        log.error('获取市值数据时发生错误: %s' % str(e))
+        log.error('获取股票信息时发生错误: %s' % str(e))
         return []
+    
+    
+    
+    return valid_stocks
 
 def handle_data(context, data):
     """
@@ -886,14 +941,13 @@ def handle_data(context, data):
             # 获取最近一年的净利润数据用于计算股息支付率
             current_year = int(context.current_dt.strftime('%Y'))
             
-            # 获取净利润数据 - 使用年份查询模式获取最新财报数据
+            # 获取净利润数据：按年份查询，取最近两年内所有季度以便计算TTM
             financial_data = get_fundamentals(
-                stock_pool, 
-                'income_statement', 
-                fields=['net_profit', 'np_parent_company_owners'],  # 移除secu_code，因为它通常在索引中
-                start_year=str(current_year-1),
-                end_year=str(current_year),
-                report_types='1'  # 年报数据，修正为字符串而非列表
+                stock_pool,
+                'income_statement',
+                fields=['np_parent_company_owners', 'net_profit', 'end_date', 'publ_date'],
+                start_year=str(current_year-2),
+                end_year=str(current_year)
             )
             
             # 获取股息率数据 - 估值数据只支持按天查询模式
@@ -928,7 +982,7 @@ def handle_data(context, data):
             #     log.info(f'股息数据索引: {dividend_data.index.names if hasattr(dividend_data.index, "names") else "单级索引"}')
             
         except Exception as e:
-            log.error(f'获取财务和股息数据时出错: {str(e)}')
+            log.error('获取财务和股息数据时出错: %s' % str(e))
             log.error(traceback.format_exc())
             # 创建空DataFrame作为备选
             financial_data = pd.DataFrame()
@@ -959,7 +1013,6 @@ def handle_data(context, data):
                             try:
                                 if stock_code in financial_df.index.get_level_values(level):
                                     stock_financial = financial_df.xs(stock_code, level=level)
-                                    # log.info('股票 %s 在财务数据第%d级索引中找到' % (stock_code, level))
                                     break
                             except:
                                 continue
@@ -969,18 +1022,42 @@ def handle_data(context, data):
                             stock_financial = financial_df.loc[stock_code]
                             log.info('股票 %s 在财务数据单级索引中找到' % stock_code)
                     
-                    if stock_financial is not None and not stock_financial.empty:
-                        # log.info('股票 %s 财务数据: %s' % (stock_code, str(stock_financial)))
-                        # 优先使用归属于母公司股东的净利润
-                        if 'net_profit_atsopc' in stock_financial.index:
-                            net_profit = stock_financial['net_profit_atsopc']
-                            # log.info('使用net_profit_atsopc: %s' % str(net_profit))
-                        elif 'net_profit' in stock_financial.index:
-                            net_profit = stock_financial['net_profit']
-                            # log.info('使用net_profit: %s' % str(net_profit))
-                        
-                        net_profit = float(net_profit) if pd.notna(net_profit) and net_profit != 0 else 0
-                        # log.info('股票 %s 净利润: %.2f万元' % (stock_code, net_profit/10000))
+                    if stock_financial is not None and not getattr(stock_financial, 'empty', False):
+                        # 优先使用归属于母公司股东的净利润，其次使用净利润
+                        if isinstance(stock_financial, pd.Series):
+                            if 'np_parent_company_owners' in stock_financial.index and pd.notna(stock_financial['np_parent_company_owners']):
+                                net_profit = float(stock_financial['np_parent_company_owners'])
+                            elif 'net_profit' in stock_financial.index and pd.notna(stock_financial['net_profit']):
+                                net_profit = float(stock_financial['net_profit'])
+                            else:
+                                net_profit = 0.0
+                        else:
+                            # DataFrame：按日期排序后取最近四期汇总为TTM净利润
+                            try:
+                                sf = stock_financial.copy()
+                                if 'publ_date' in sf.columns:
+                                    sf = sf.sort_values('publ_date')
+                                elif 'end_date' in sf.columns:
+                                    sf = sf.sort_values('end_date')
+                                # 选择利润列
+                                profit_col = 'np_parent_company_owners' if ('np_parent_company_owners' in sf.columns and sf['np_parent_company_owners'].notna().any()) else ('net_profit' if ('net_profit' in sf.columns and sf['net_profit'].notna().any()) else None)
+                                if profit_col is not None:
+                                    profit_series = pd.to_numeric(sf[profit_col], errors='coerce').dropna()
+                                    if len(profit_series) > 0:
+                                        net_profit = float(profit_series.tail(4).sum())
+                                    else:
+                                        net_profit = 0.0
+                                else:
+                                    net_profit = 0.0
+                            except Exception as _e:
+                                log.warning('计算TTM净利润异常: %s' % str(_e))
+                                # 回退到最后一个非空值
+                                if 'np_parent_company_owners' in stock_financial.columns and stock_financial['np_parent_company_owners'].notna().any():
+                                    net_profit = float(stock_financial['np_parent_company_owners'].dropna().iloc[-1])
+                                elif 'net_profit' in stock_financial.columns and stock_financial['net_profit'].notna().any():
+                                    net_profit = float(stock_financial['net_profit'].dropna().iloc[-1])
+                                else:
+                                    net_profit = 0.0
                     else:
                         log.info('股票 %s 未找到财务数据' % stock_code)
                 else:
@@ -1007,24 +1084,29 @@ def handle_data(context, data):
                             stock_dividend = dividend_df.loc[stock_code]
                             log.info('股票 %s 在股息数据单级索引中找到' % stock_code)
                     
-                    if stock_dividend is not None and not stock_dividend.empty:
-                        log.info('股票 %s 股息数据: %s' % (stock_code, str(stock_dividend)))
+                    if stock_dividend is not None and not getattr(stock_dividend, 'empty', False):
                         # 从股息率和市值计算分红金额
                         dividend_ratio = 0
                         market_value = 0
                         
-                        # 处理股息率
                         if isinstance(stock_dividend, pd.Series):
                             if 'dividend_ratio' in stock_dividend.index:
-                                div_ratio = stock_dividend['dividend_ratio']
-                                if isinstance(div_ratio, str):
-                                    dividend_ratio = float(div_ratio.strip('%'))
-                                else:
-                                    dividend_ratio = float(div_ratio) if pd.notna(div_ratio) and div_ratio != 0 else 0
-                            
+                                div_ratio_val = stock_dividend['dividend_ratio']
+                                # 统一转为标量，避免Series布尔歧义
+                                if isinstance(div_ratio_val, pd.Series):
+                                    div_ratio_val = div_ratio_val.dropna()
+                                    div_ratio_val = div_ratio_val.iloc[-1] if not div_ratio_val.empty else np.nan
+                                if isinstance(div_ratio_val, str):
+                                    div_ratio_val = div_ratio_val.strip('%')
+                                div_ratio_float = pd.to_numeric(div_ratio_val, errors='coerce')
+                                dividend_ratio = float(div_ratio_float) if not pd.isna(div_ratio_float) and float(div_ratio_float) != 0 else 0
                             if 'total_value' in stock_dividend.index:
                                 total_val = stock_dividend['total_value']
-                                market_value = float(total_val) if pd.notna(total_val) and total_val != 0 else 0
+                                if isinstance(total_val, pd.Series):
+                                    total_val = total_val.dropna()
+                                    total_val = total_val.iloc[-1] if not total_val.empty else np.nan
+                                total_val_float = pd.to_numeric(total_val, errors='coerce')
+                                market_value = float(total_val_float) if not pd.isna(total_val_float) and float(total_val_float) != 0 else 0
                         elif isinstance(stock_dividend, pd.DataFrame):
                             if 'dividend_ratio' in stock_dividend.columns:
                                 div_ratio = stock_dividend['dividend_ratio'].iloc[0]
@@ -1032,7 +1114,6 @@ def handle_data(context, data):
                                     dividend_ratio = float(div_ratio.strip('%'))
                                 else:
                                     dividend_ratio = float(div_ratio) if pd.notna(div_ratio) and div_ratio != 0 else 0
-                            
                             if 'total_value' in stock_dividend.columns:
                                 total_val = stock_dividend['total_value'].iloc[0]
                                 market_value = float(total_val) if pd.notna(total_val) and total_val != 0 else 0
@@ -1047,22 +1128,20 @@ def handle_data(context, data):
                 else:
                     log.info('股息数据为空')
                 
-                # 计算股息支付率
-                # 确保net_profit和dividend_amount是标量值
-                net_profit_val = float(net_profit) if pd.notna(net_profit) else 0
-                dividend_amount_val = float(dividend_amount) if pd.notna(dividend_amount) else 0
+                # 计算股息支付率（记录原始与截断值以便诊断）
+                net_profit_val = float(net_profit) if pd.notna(net_profit) else 0.0
+                dividend_amount_val = float(dividend_amount) if pd.notna(dividend_amount) else 0.0
                 
                 if net_profit_val > 0 and dividend_amount_val > 0:
                     payout_ratio = (dividend_amount_val / net_profit_val) * 100
-                    final_ratio = min(payout_ratio, 100)  # 限制最大值为100%
-                    log.info('股票 %s 股息支付率: %.2f%%' % (stock_code, final_ratio))
+                    final_ratio = min(payout_ratio, 100)
+                    log.info('股票 %s 股息支付率原始: %.2f%%, 截断: %.2f%% (净利润TTM: %.2f, 分红金额TTM: %.2f)' % (stock_code, payout_ratio, final_ratio, net_profit_val, dividend_amount_val))
                     return final_ratio
                 else:
-                    log.info('股票 %s 股息支付率为0 (净利润: %.2f, 分红金额: %.2f)' % (stock_code, net_profit_val, dividend_amount_val))
+                    log.info('股票 %s 股息支付率为0 (净利润TTM: %.2f, 分红金额TTM: %.2f)' % (stock_code, net_profit_val, dividend_amount_val))
                     return 0
-                    
             except Exception as e:
-                log.error(f'计算股票{stock_code}股息支付率时发生错误: {str(e)}')
+                log.error('计算股票%s股息支付率时发生错误: %s' % (stock_code, str(e)))
                 return 0
         
         # 处理每个股票的因子数据
@@ -1123,16 +1202,24 @@ def handle_data(context, data):
                         if isinstance(stock_dividend, pd.Series):
                             # 如果是Series，直接通过索引访问
                             if 'dividend_ratio' in stock_dividend.index:
-                                div_ratio = stock_dividend['dividend_ratio']
-                                if isinstance(div_ratio, str):
-                                    stock_factors[stock]['dividend_ratio'] = float(div_ratio.strip('%'))
-                                else:
-                                    stock_factors[stock]['dividend_ratio'] = float(div_ratio) if pd.notna(div_ratio) and div_ratio != 0 else 0
+                                div_ratio_val = stock_dividend['dividend_ratio']
+                                # 统一转为标量，避免Series布尔歧义
+                                if isinstance(div_ratio_val, pd.Series):
+                                    div_ratio_val = div_ratio_val.dropna()
+                                    div_ratio_val = div_ratio_val.iloc[-1] if not div_ratio_val.empty else np.nan
+                                if isinstance(div_ratio_val, str):
+                                    div_ratio_val = div_ratio_val.strip('%')
+                                div_ratio_float = pd.to_numeric(div_ratio_val, errors='coerce')
+                                stock_factors[stock]['dividend_ratio'] = float(div_ratio_float) if not pd.isna(div_ratio_float) and float(div_ratio_float) != 0 else 0
                                 # log.info('股票 %s 股息率(Series): %.2f%%' % (stock, stock_factors[stock]['dividend_ratio']))
                             
                             if 'total_value' in stock_dividend.index:
                                 market_val = stock_dividend['total_value']
-                                stock_factors[stock]['market_value'] = float(market_val) if pd.notna(market_val) and market_val != 0 else float('inf')
+                                if isinstance(market_val, pd.Series):
+                                    market_val = market_val.dropna()
+                                    market_val = market_val.iloc[-1] if not market_val.empty else np.nan
+                                market_val_float = pd.to_numeric(market_val, errors='coerce')
+                                stock_factors[stock]['market_value'] = float(market_val_float) if not pd.isna(market_val_float) and float(market_val_float) != 0 else float('inf')
                                 # log.info('股票 %s 市值(Series): %.2f万元' % (stock, stock_factors[stock]['market_value']/10000))
                         elif isinstance(stock_dividend, pd.DataFrame):
                             # 如果是DataFrame，检查列
@@ -1188,16 +1275,62 @@ def handle_data(context, data):
                 continue
 
         # 对每个因子进行排序并分配分数
+        # 基于排名的加权总分：每个因子按有利方向排名，
+        # 顶部得分为N，次序依次递减到1；总分为五个因子分数之和
+        N = len(stock_pool)
         sorted_stocks = []
-        for stock in stock_pool:
-            total_score = (
-                -stock_factors[stock]['close_price'] +  # 收盘价从低到高
-                stock_factors[stock]['dividend_ratio'] +  # 股息率从高到低
-                stock_factors[stock]['payout_ratio'] +   # 股息支付率从大到小
-                stock_factors[stock]['insider_holding'] + # 高管增持比例从高到低
-                -stock_factors[stock]['market_value']    # 总市值从小到大
-            )
-            sorted_stocks.append((stock, total_score))
+        if N == 0:
+            log.warning('多因子排序阶段输入股票为空')
+        else:
+            # 为避免缺失值导致异常，使用安全取值函数
+            def _close_val(s):
+                return stock_factors.get(s, {}).get('close_price', float('inf'))
+            def _div_val(s):
+                return stock_factors.get(s, {}).get('dividend_ratio', 0)
+            def _payout_val(s):
+                return stock_factors.get(s, {}).get('payout_ratio', 0)
+            def _insider_val(s):
+                return stock_factors.get(s, {}).get('insider_holding', 0)
+            def _mcap_val(s):
+                return stock_factors.get(s, {}).get('market_value', float('inf'))
+            
+            # 按有利方向进行排序
+            close_sorted   = sorted(stock_pool, key=_close_val)                    # 低价优先
+            dividend_sorted= sorted(stock_pool, key=_div_val, reverse=True)        # 股息率高优先
+            # 使用股息支付率参与计分
+            payout_sorted  = sorted(stock_pool, key=_payout_val, reverse=True)     # 支付率高优先（可调整方向）
+            insider_sorted = []                                                    # 不使用
+            mcap_sorted    = sorted(stock_pool, key=_mcap_val)                     # 市值小优先
+            
+            # 将排序转换为分数映射：rank 0 -> N, rank 1 -> N-1 ...
+            def make_score_map(sorted_list):
+                return dict((s, N - idx) for idx, s in enumerate(sorted_list))
+            
+            score_close   = make_score_map(close_sorted)
+            score_div     = make_score_map(dividend_sorted)
+            score_payout  = make_score_map(payout_sorted)
+            score_insider = dict((s, 0) for s in stock_pool)
+            score_mcap    = make_score_map(mcap_sorted)
+            
+            # 计算总分并记录日志
+            for stock in stock_pool:
+                total_score = (
+                    score_close.get(stock, 0) +
+                    score_div.get(stock, 0) +
+                    score_payout.get(stock, 0) +
+                    score_insider.get(stock, 0) +
+                    score_mcap.get(stock, 0)
+                )
+                log.info('total_score: %s = %d (close=%d, div=%d, payout=%d, insider=%d, mcap=%d)' % (
+                    stock,
+                    total_score,
+                    score_close.get(stock, 0),
+                    score_div.get(stock, 0),
+                    score_payout.get(stock, 0),
+                    score_insider.get(stock, 0),
+                    score_mcap.get(stock, 0)
+                ))
+                sorted_stocks.append((stock, total_score))
             
         # 根据总分排序
         sorted_stocks.sort(key=lambda x: x[1], reverse=True)
