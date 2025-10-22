@@ -33,18 +33,18 @@ def initialize(context):
     # 每天运行
     context.refresh_rate = 1
     context.day_counter = 0
-    # 周一选股设置：每周一选股并调仓（weekday=0，周一=0）
-    context.weekly_buy_weekday = 0  # 周一选股买入
+    # 周五选股设置：每周五选股并调仓（weekday=4，周五=4）
+    context.weekly_buy_weekday = 4  # 周五选股买入
     # 选股数量设置
     context.selection_count = 5  # 每次选择5只股票
-    # 记录上周一选股结果，用于对比
-    context.last_monday_selection = []
+    # 记录上周五选股结果，用于对比
+    context.last_friday_selection = []
     context.last_selection_date = None
     # 记录当天是否已执行选股，避免同日重复执行
     context.last_buy_date = None
     
     # 交易结束日期设置（写死的日期）
-    context.trading_end_date = datetime.date(2025, 1, 13)  # 设置交易结束日期为2024年12月30日（周一）
+    context.trading_end_date = datetime.date(2025, 1, 12)  # 设置交易结束日期为2024年12月30日（周一）
     
     # 初始化全局变量
     g.recent_orders = []  # 用于跟踪最近的订单
@@ -826,15 +826,15 @@ def get_stock_pool(context):
 
 def handle_data(context, data):
     """
-    交易逻辑主函数 - 周一选股轮换策略
-    每周一选股5只，与上周一选股对比：
+    交易逻辑主函数 - 周五选股轮换策略
+    每周五选股5只，与上周五选股对比：
     - 保留重复的股票（不卖出）
-    - 卖出上周一不重复的股票
-    - 买入本周一新增的股票
+    - 卖出上周五不重复的股票
+    - 买入本周五新增的股票
     
     特殊逻辑：
     - 如果到达交易结束日期，执行清仓操作
-    - 如果交易结束日期是周一，不执行买入操作，只执行清仓
+    - 如果交易结束日期是周五，不执行买入操作，只执行清仓
     """
     # 检查是否到达交易结束日期
     today = context.current_dt.date()
@@ -897,7 +897,7 @@ def handle_data(context, data):
             # 当天首次提示，后续同日不再重复打印
             last_log_date = getattr(context, 'last_already_selected_log_date', None)
             if last_log_date != today:
-                log.info('今日已完成周一选股，跳过重复执行')
+                log.info('今日已完成周五选股，跳过重复执行')
                 try:
                     context.last_already_selected_log_date = today
                 except Exception:
@@ -921,13 +921,13 @@ def handle_data(context, data):
         # log.info('价格数据形状: %s' % str(price_data.shape if hasattr(price_data, 'shape') else 'N/A'))
         # log.info('价格数据列名: %s' % str(price_data.columns.tolist() if hasattr(price_data, 'columns') else 'N/A'))
         if hasattr(price_data, 'head'):
-            log.info('价格数据前几行:\n%s' % str(price_data.head()))
+            log.debug('价格数据前几行:\n%s' % str(price_data.head()))
         
         # 2. 获取股息率数据
         dividend_data = get_fundamentals(stock_pool, 'valuation', fields=['dividend_ratio'])
-        # log.info('股息率数据类型: %s' % type(dividend_data))
+        # log.debug('股息率数据类型: %s' % type(dividend_data))
         if hasattr(dividend_data, 'head'):
-            log.info('股息率数据前几行:\n%s' % str(dividend_data.head()))
+            log.debug('股息率数据前几行:\n%s' % str(dividend_data.head()))
         
         # 3. 获取总市值数据
         market_data = get_fundamentals(stock_pool, 'valuation', fields=['total_value'])
@@ -1338,10 +1338,15 @@ def handle_data(context, data):
         # 获取排序后的股票列表
         stock_pool = [stock for stock, _ in sorted_stocks]
         
-        log.info('多因子排序后的股票列表:')
+        log.debug('多因子排序后的股票列表:')
+        try:
+            names_map_all = get_stock_info(stock_pool, ['stock_name'])
+        except Exception:
+            names_map_all = {}
         for stock, score in sorted_stocks:
-            stock_info = get_stock_info([stock], ['stock_name'])[stock]
-            log.info(f"{stock}({stock_info['stock_name']}): 收盘价={stock_factors[stock]['close_price']:.2f}, "
+            info = names_map_all.get(stock, {'stock_name': stock})
+            stock_name = info.get('stock_name', stock)
+            log.debug(f"{stock}({stock_name}): 收盘价={stock_factors[stock]['close_price']:.2f}, "
                     f"股息率={stock_factors[stock]['dividend_ratio']:.2f}%, "
                     f"股息支付率={stock_factors[stock]['payout_ratio']:.2f}, "
                     f"总市值={stock_factors[stock]['market_value']/100000000:.2f}亿")
@@ -1349,24 +1354,29 @@ def handle_data(context, data):
     except Exception as e:
         log.error(f'多因子排序过程中发生错误: {str(e)}')
     
-    log.info('选股结果名称2: %s' % get_stock_info(stock_pool, ['stock_name']))
+    log.debug('选股结果名称2: %s' % get_stock_info(stock_pool, ['stock_name']))
     
     # 选取前5只股票进行交易
     selection_count = getattr(context, 'selection_count', 5)
     top_stocks = stock_pool[:selection_count] if len(stock_pool) >= selection_count else stock_pool
-    log.info('选取前%d只股票进行交易: %s' % (len(top_stocks), get_stock_info(top_stocks, ['stock_name'])))
+    names_map = get_stock_info(top_stocks, ['stock_name'])
+    log.info('选取前%d只股票进行交易: %s' % (len(top_stocks), names_map))
     log.info('前%d只股票详细信息:' % len(top_stocks))
     for i, stock in enumerate(top_stocks, 1):
         if stock in stock_factors:
-            stock_info = get_stock_info([stock], ['stock_name'])[stock]
-            log.info(f"第{i}名: {stock}({stock_info['stock_name']}): "
+            info = names_map.get(stock, {'stock_name': stock})
+            stock_name = info.get('stock_name', stock)
+            log.info(f"第{i}名: {stock}({stock_name}): "
                     f"收盘价={stock_factors[stock]['close_price']:.2f}, "
                     f"股息率={stock_factors[stock]['dividend_ratio']:.2f}%, "
                     f"总市值={stock_factors[stock]['market_value']/100000000:.2f}亿")
     
-    # 与上周一选股对比：保留重复、卖出不重复、买入新增
-    # 获取上周一选股结果，如果为空则尝试从当前持仓回退
-    last_list = getattr(context, 'last_monday_selection', [])
+    # 与上周五选股对比：保留重复、卖出不重复、买入新增
+    # 获取上周五选股结果，如果为空则尝试从当前持仓回退
+    last_list = getattr(context, 'last_friday_selection', None)
+    if last_list is None:
+        # 兼容旧变量名
+        last_list = getattr(context, 'last_monday_selection', [])
     if not last_list:
         # 回退：使用当前持仓作为"上周选择"
         try:
@@ -1378,7 +1388,7 @@ def handle_data(context, data):
                         last_list.append(_normalize_local(pos_key))
                     elif hasattr(position, 'amount') and position.amount > 0:
                         last_list.append(_normalize_local(pos_key))
-                log.info(f'未找到last_monday_selection，使用当前持仓回退为上周选择: {last_list}')
+                log.info(f'未找到last_friday_selection，使用当前持仓回退为上周选择: {last_list}')
             else:
                 log.info('当前无持仓，首次选股')
         except Exception as e:
@@ -1393,13 +1403,13 @@ def handle_data(context, data):
     to_buy = sorted(list(current_selection - last_selection))
     
     if last_selection:
-        log.info('与上周一选股对比: 保留(重复)=%s, 卖出(不重复)=%s, 买入(新增)=%s' % (
+        log.info('与上周五选股对比: 保留(重复)=%s, 卖出(不重复)=%s, 买入(新增)=%s' % (
             get_stock_info(overlap, ['stock_name']) if overlap else {},
             get_stock_info(to_sell, ['stock_name']) if to_sell else {},
             get_stock_info(to_buy, ['stock_name']) if to_buy else {}
         ))
     else:
-        log.info('首次周一选股，无上周对比，目标买入: %s' % get_stock_info(top_stocks, ['stock_name']))
+        log.info('首次周五选股，无上周对比，目标买入: %s' % get_stock_info(top_stocks, ['stock_name']))
 
     # 告知调仓逻辑保留 overlap，不对其做再平衡；仅卖出 to_sell，买入 to_buy
     try:
@@ -1425,7 +1435,8 @@ def handle_data(context, data):
     # 记录本次已在今日执行建仓，并更新上周一选股缓存
     try:
         context.last_buy_date = context.current_dt.date()
-        context.last_monday_selection = top_stocks
+        context.last_friday_selection = top_stocks
+        context.last_monday_selection = top_stocks  # 兼容旧变量
         context.last_selection_date = context.current_dt.date()
     except Exception:
         pass
@@ -1443,18 +1454,59 @@ def get_market_open_price(stock, context):
         start_time = datetime.datetime.combine(current_date, datetime.time(9, 35))
         end_time = start_time + datetime.timedelta(minutes=1)
         
-        # 使用get_history获取9:35这一分钟的数据
-        price_data = get_history(1, '5m', ['close'], security_list=[stock], 
-                               include=True)  # include=True包含当前未结束的周期
+        # 优先使用缓存的9:35价格，若无则进行一次性批量获取
+        cache_date = getattr(context, 'market_open_price_cache_date', None)
+        cache = getattr(context, 'market_open_price_cache', None)
+        if cache_date != current_date or not isinstance(cache, dict):
+            # 组装批量查询列表：当前持仓 + 目标股票
+            try:
+                positions = get_positions()
+                pos_list = list(positions.keys()) if positions else []
+            except Exception:
+                pos_list = []
+            target_keys = list(getattr(context, 'target_position_keys', []))
+            query_list = sorted(set([_normalize_local(s) for s in (pos_list + target_keys)]))
+            if query_list:
+                batch = get_history(1, '5m', ['close'], security_list=query_list, include=True)
+                new_cache = {}
+                if not batch.empty:
+                    for code in query_list:
+                        stock_data = batch[batch['code'] == code]
+                        if not stock_data.empty:
+                            new_cache[code] = float(stock_data['close'].iloc[-1])
+                # 同步批量获取当日日线收盘价作为回退缓存
+                try:
+                    daily_batch = get_history(1, '1d', ['close'], security_list=query_list)
+                    fallback_cache = {}
+                    if not daily_batch.empty:
+                        for code in query_list:
+                            stock_data2 = daily_batch[daily_batch['code'] == code]
+                            if not stock_data2.empty:
+                                fallback_cache[code] = float(stock_data2['close'].iloc[-1])
+                    context.market_open_price_fallback_cache = fallback_cache
+                except Exception:
+                    context.market_open_price_fallback_cache = {}
+                context.market_open_price_cache = new_cache
+                context.market_open_price_cache_date = current_date
+                cache = new_cache
+            else:
+                context.market_open_price_cache = {}
+                context.market_open_price_fallback_cache = {}
+                context.market_open_price_cache_date = current_date
+                cache = {}
+        # 命中缓存直接返回
+        if isinstance(cache, dict) and stock in cache:
+            market_open_price = cache[stock]
+            log.debug(f'股票{stock}开盘后5分钟价格(缓存): {market_open_price:.2f}元')
+            return market_open_price
         
-        if not price_data.empty:
-            stock_data = price_data[price_data['code'] == stock]
-            if not stock_data.empty:
-                market_open_price = stock_data['close'].iloc[-1]  # 取最新的价格
-                log.debug(f'股票{stock}开盘后5分钟价格: {market_open_price:.2f}元')
-                return market_open_price
-        
-        # 如果无法获取9:35的价格，尝试获取当前价格作为备选
+        # 如果无法获取9:35的价格，首先尝试使用批量缓存的当日收盘价
+        fallback_cache = getattr(context, 'market_open_price_fallback_cache', {})
+        if isinstance(fallback_cache, dict) and stock in fallback_cache:
+            fallback_price = fallback_cache[stock]
+            log.warning(f'无法获取股票{stock}开盘后5分钟价格，使用当日收盘价(缓存): {fallback_price:.2f}元')
+            return fallback_price
+        # 若没有缓存，退回到单只股票查询当日收盘价
         current_data = get_history(1, '1d', ['close'], security_list=[stock])
         if not current_data.empty:
             stock_data = current_data[current_data['code'] == stock]
@@ -1501,6 +1553,15 @@ def adjust_position(context, target_position):
         log.warning(f'get_positions()获取失败: {str(e)}，尝试使用context.portfolio.positions')
         # 备用方案：使用原来的方法
         current_positions = context.portfolio.positions
+
+    # 获取保留股票集合（规范化代码），供延迟卖出与卖出逻辑使用
+    keep_codes = getattr(context, 'rotation_keep_codes', set())
+
+    # 记录本次目标股票集合，供价格缓存批量查询使用
+    try:
+        context.target_position_keys = list(target_position.keys())
+    except Exception:
+        context.target_position_keys = []
 
     # 初始化或获取延迟卖出集合（用于T+1或当日买入的情况）
     if not hasattr(context, 'deferred_sells'):
@@ -1604,8 +1665,7 @@ def adjust_position(context, target_position):
     if len(target_position) == 0:
         log.warning('目标持仓为空，将清空所有持仓')
     
-    # 获取保留股票集合（规范化代码）
-    keep_codes = getattr(context, 'rotation_keep_codes', set())
+    # 获取保留股票集合（规范化代码）（已在函数顶部初始化）
     if keep_codes:
         log.debug(f'本次调仓将保留以下股票不卖出: {keep_codes}')
     
