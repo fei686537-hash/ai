@@ -33,18 +33,18 @@ def initialize(context):
     # 每天运行
     context.refresh_rate = 1
     context.day_counter = 0
-    # 周五选股设置：每周五选股并调仓（weekday=4，周五=4）
+    # 周五选股设置：每周五选股并调仓（weekday=0，周一=0）
     context.weekly_buy_weekday = 4  # 周五选股买入
     # 选股数量设置
     context.selection_count = 5  # 每次选择5只股票
-    # 记录上周五选股结果，用于对比
+    # 记录上周一选股结果，用于对比
     context.last_friday_selection = []
     context.last_selection_date = None
     # 记录当天是否已执行选股，避免同日重复执行
     context.last_buy_date = None
     
     # 交易结束日期设置（写死的日期）
-    context.trading_end_date = datetime.date(2025, 1, 12)  # 设置交易结束日期为2024年12月30日（周一）
+    context.trading_end_date = datetime.date(2025, 1, 13)  # 设置交易结束日期为2024年12月30日（周一）
     
     # 初始化全局变量
     g.recent_orders = []  # 用于跟踪最近的订单
@@ -100,7 +100,6 @@ def get_stock_pool(context):
     # 获取所有A股代码
     stocks = get_Ashares()
     log.info('初始股票池数量: %d' % len(stocks))
-    
     # 获取当前日期
     current_date = context.current_dt
     
@@ -614,7 +613,6 @@ def get_stock_pool(context):
 # 6. 剔除换手率最高的50%
     log.info("==========开始换手率筛选==========")
     log.info("输入股票数量: {}".format(len(valid_stocks)))
-    
     try:
         # 使用PTrade API获取估值数据中的换手率
         turnover_data = get_fundamentals(valid_stocks, 'valuation', 
@@ -764,6 +762,7 @@ def get_stock_pool(context):
         
     log.info('最终筛选后数量: %d' % len(valid_stocks))
     # log.info('最终筛选后股票: %s' % valid_stocks) 
+    
     # 13. 剔除科创板、创业板、北交所、ST
     try:
         stock_info = get_stock_info(valid_stocks, ['stock_name'])
@@ -784,10 +783,10 @@ def get_stock_pool(context):
                     is_excluded = False
                     reason = None
                     
-                    if stock.startswith('688'):
+                    if stock.startswith('68'):
                         is_excluded = True
                         reason = '科创板'
-                    elif stock.startswith('300'):
+                    elif stock.startswith('3'):
                         is_excluded = True
                         reason = '创业板'
                     elif stock.startswith('8'):
@@ -806,11 +805,6 @@ def get_stock_pool(context):
                 log.info('处理股票 %s 类型判断时出错: %s' % (stock, str(e)))
                 continue
                 
-        if excluded_stocks:
-            log.info('以下股票因类型不符被剔除:')
-            for stock, name, reason in excluded_stocks:
-                log.info('  %s (%s): %s' % (stock, name, reason))
-                
         valid_stocks = filtered_stocks
     
         log.info('科创板等剔除后数量: %d' % len(valid_stocks))
@@ -819,8 +813,6 @@ def get_stock_pool(context):
     except Exception as e:
         log.error('获取股票信息时发生错误: %s' % str(e))
         return []
-    
-    
     
     return valid_stocks
 
@@ -848,12 +840,16 @@ def handle_data(context, data):
             if current_positions:
                 log.info('开始清仓，当前持仓: %s' % list(current_positions.keys()))
                 for pos_key, position in current_positions.items():
-                    if hasattr(position, 'total_amount') and position.total_amount > 0:
+                    # 检查持仓数量，避免重复清仓和重复log
+                    position_amount = 0
+                    if hasattr(position, 'total_amount'):
+                        position_amount = position.total_amount
+                    elif hasattr(position, 'amount'):
+                        position_amount = position.amount
+                    
+                    if position_amount > 0:
                         order_target_percent(pos_key, 0)
-                        log.info('清仓股票: %s' % pos_key)
-                    elif hasattr(position, 'amount') and position.amount > 0:
-                        order_target_percent(pos_key, 0)
-                        log.info('清仓股票: %s' % pos_key)
+                        log.info('清仓股票: %s (持仓数量: %s)' % (pos_key, position_amount))
                 log.info('清仓操作完成')
             else:
                 log.info('当前无持仓，无需清仓')
@@ -905,7 +901,7 @@ def handle_data(context, data):
             return
     except Exception as e:
         log.warning('选股日判断异常: %s，允许本次继续执行' % str(e))
-
+    
     stock_pool = get_stock_pool(context)
 
     # 若选股结果为空，直接返回，避免不必要的下单逻辑
@@ -921,11 +917,11 @@ def handle_data(context, data):
         # log.info('价格数据形状: %s' % str(price_data.shape if hasattr(price_data, 'shape') else 'N/A'))
         # log.info('价格数据列名: %s' % str(price_data.columns.tolist() if hasattr(price_data, 'columns') else 'N/A'))
         if hasattr(price_data, 'head'):
-            log.debug('价格数据前几行:\n%s' % str(price_data.head()))
+            log.debug('价格数据前几行:\n%s' % str(price_data))
         
         # 2. 获取股息率数据
         dividend_data = get_fundamentals(stock_pool, 'valuation', fields=['dividend_ratio'])
-        # log.debug('股息率数据类型: %s' % type(dividend_data))
+        # log.info('股息率数据类型: %s' % type(dividend_data))
         if hasattr(dividend_data, 'head'):
             log.debug('股息率数据前几行:\n%s' % str(dividend_data.head()))
         
@@ -956,7 +952,6 @@ def handle_data(context, data):
                 stock_pool, 
                 'valuation', 
                 fields=['dividend_ratio', 'total_value'],  # 移除secu_code，因为它通常在索引中
-                date=context.previous_date  # 使用前一交易日的数据，而不是当前日期
             )
             
             # 尝试获取更多历史数据作为备选
@@ -1162,13 +1157,14 @@ def handle_data(context, data):
                 close_price = 0
                 if price_data is not None and not price_data.empty:
                     # 根据PTrade API，price_data通常包含code列
+                    log.info('股票 %s' % (price_data.columns))
                     if 'code' in price_data.columns:
                         stock_price_data = price_data[price_data['code'] == stock]
-                        if not stock_price_data.empty and 'close' in stock_price_data.columns:
-                            close_price = float(stock_price_data['close'].iloc[-1])
+                        if not stock_price_data.empty:
+                            close_price = float(stock_price_data['close'].iloc[0])
                     # 如果是以股票代码为列名的格式
                     elif stock in price_data.columns:
-                        close_price = float(price_data[stock].iloc[-1])
+                        close_price = float(price_data[stock].iloc[0])
                 
                 stock_factors[stock]['close_price'] = close_price
                 log.info('股票 %s 收盘价: %.2f' % (stock, close_price))
@@ -1338,15 +1334,10 @@ def handle_data(context, data):
         # 获取排序后的股票列表
         stock_pool = [stock for stock, _ in sorted_stocks]
         
-        log.debug('多因子排序后的股票列表:')
-        try:
-            names_map_all = get_stock_info(stock_pool, ['stock_name'])
-        except Exception:
-            names_map_all = {}
+        log.info('多因子排序后的股票列表:')
         for stock, score in sorted_stocks:
-            info = names_map_all.get(stock, {'stock_name': stock})
-            stock_name = info.get('stock_name', stock)
-            log.debug(f"{stock}({stock_name}): 收盘价={stock_factors[stock]['close_price']:.2f}, "
+            stock_info = get_stock_info([stock], ['stock_name'])[stock]
+            log.info(f"{stock}({stock_info['stock_name']}): 收盘价={stock_factors[stock]['close_price']:.2f}, "
                     f"股息率={stock_factors[stock]['dividend_ratio']:.2f}%, "
                     f"股息支付率={stock_factors[stock]['payout_ratio']:.2f}, "
                     f"总市值={stock_factors[stock]['market_value']/100000000:.2f}亿")
@@ -1359,24 +1350,19 @@ def handle_data(context, data):
     # 选取前5只股票进行交易
     selection_count = getattr(context, 'selection_count', 5)
     top_stocks = stock_pool[:selection_count] if len(stock_pool) >= selection_count else stock_pool
-    names_map = get_stock_info(top_stocks, ['stock_name'])
-    log.info('选取前%d只股票进行交易: %s' % (len(top_stocks), names_map))
+    log.info('选取前%d只股票进行交易: %s' % (len(top_stocks), get_stock_info(top_stocks, ['stock_name'])))
     log.info('前%d只股票详细信息:' % len(top_stocks))
     for i, stock in enumerate(top_stocks, 1):
         if stock in stock_factors:
-            info = names_map.get(stock, {'stock_name': stock})
-            stock_name = info.get('stock_name', stock)
-            log.info(f"第{i}名: {stock}({stock_name}): "
+            stock_info = get_stock_info([stock], ['stock_name'])[stock]
+            log.info(f"第{i}名: {stock}({stock_info['stock_name']}): "
                     f"收盘价={stock_factors[stock]['close_price']:.2f}, "
                     f"股息率={stock_factors[stock]['dividend_ratio']:.2f}%, "
                     f"总市值={stock_factors[stock]['market_value']/100000000:.2f}亿")
     
-    # 与上周五选股对比：保留重复、卖出不重复、买入新增
+    # 与上周一选股对比：保留重复、卖出不重复、买入新增
     # 获取上周五选股结果，如果为空则尝试从当前持仓回退
-    last_list = getattr(context, 'last_friday_selection', None)
-    if last_list is None:
-        # 兼容旧变量名
-        last_list = getattr(context, 'last_monday_selection', [])
+    last_list = getattr(context, 'last_friday_selection', [])
     if not last_list:
         # 回退：使用当前持仓作为"上周选择"
         try:
@@ -1436,7 +1422,6 @@ def handle_data(context, data):
     try:
         context.last_buy_date = context.current_dt.date()
         context.last_friday_selection = top_stocks
-        context.last_monday_selection = top_stocks  # 兼容旧变量
         context.last_selection_date = context.current_dt.date()
     except Exception:
         pass
@@ -1454,59 +1439,18 @@ def get_market_open_price(stock, context):
         start_time = datetime.datetime.combine(current_date, datetime.time(9, 35))
         end_time = start_time + datetime.timedelta(minutes=1)
         
-        # 优先使用缓存的9:35价格，若无则进行一次性批量获取
-        cache_date = getattr(context, 'market_open_price_cache_date', None)
-        cache = getattr(context, 'market_open_price_cache', None)
-        if cache_date != current_date or not isinstance(cache, dict):
-            # 组装批量查询列表：当前持仓 + 目标股票
-            try:
-                positions = get_positions()
-                pos_list = list(positions.keys()) if positions else []
-            except Exception:
-                pos_list = []
-            target_keys = list(getattr(context, 'target_position_keys', []))
-            query_list = sorted(set([_normalize_local(s) for s in (pos_list + target_keys)]))
-            if query_list:
-                batch = get_history(1, '5m', ['close'], security_list=query_list, include=True)
-                new_cache = {}
-                if not batch.empty:
-                    for code in query_list:
-                        stock_data = batch[batch['code'] == code]
-                        if not stock_data.empty:
-                            new_cache[code] = float(stock_data['close'].iloc[-1])
-                # 同步批量获取当日日线收盘价作为回退缓存
-                try:
-                    daily_batch = get_history(1, '1d', ['close'], security_list=query_list)
-                    fallback_cache = {}
-                    if not daily_batch.empty:
-                        for code in query_list:
-                            stock_data2 = daily_batch[daily_batch['code'] == code]
-                            if not stock_data2.empty:
-                                fallback_cache[code] = float(stock_data2['close'].iloc[-1])
-                    context.market_open_price_fallback_cache = fallback_cache
-                except Exception:
-                    context.market_open_price_fallback_cache = {}
-                context.market_open_price_cache = new_cache
-                context.market_open_price_cache_date = current_date
-                cache = new_cache
-            else:
-                context.market_open_price_cache = {}
-                context.market_open_price_fallback_cache = {}
-                context.market_open_price_cache_date = current_date
-                cache = {}
-        # 命中缓存直接返回
-        if isinstance(cache, dict) and stock in cache:
-            market_open_price = cache[stock]
-            log.debug(f'股票{stock}开盘后5分钟价格(缓存): {market_open_price:.2f}元')
-            return market_open_price
+        # 使用get_history获取9:35这一分钟的数据
+        price_data = get_history(1, '5m', ['close'], security_list=[stock], 
+                               include=True)  # include=True包含当前未结束的周期
         
-        # 如果无法获取9:35的价格，首先尝试使用批量缓存的当日收盘价
-        fallback_cache = getattr(context, 'market_open_price_fallback_cache', {})
-        if isinstance(fallback_cache, dict) and stock in fallback_cache:
-            fallback_price = fallback_cache[stock]
-            log.warning(f'无法获取股票{stock}开盘后5分钟价格，使用当日收盘价(缓存): {fallback_price:.2f}元')
-            return fallback_price
-        # 若没有缓存，退回到单只股票查询当日收盘价
+        if not price_data.empty:
+            stock_data = price_data[price_data['code'] == stock]
+            if not stock_data.empty:
+                market_open_price = stock_data['close'].iloc[-1]  # 取最新的价格
+                log.debug(f'股票{stock}开盘后5分钟价格: {market_open_price:.2f}元')
+                return market_open_price
+        
+        # 如果无法获取9:35的价格，尝试获取当前价格作为备选
         current_data = get_history(1, '1d', ['close'], security_list=[stock])
         if not current_data.empty:
             stock_data = current_data[current_data['code'] == stock]
@@ -1553,15 +1497,6 @@ def adjust_position(context, target_position):
         log.warning(f'get_positions()获取失败: {str(e)}，尝试使用context.portfolio.positions')
         # 备用方案：使用原来的方法
         current_positions = context.portfolio.positions
-
-    # 获取保留股票集合（规范化代码），供延迟卖出与卖出逻辑使用
-    keep_codes = getattr(context, 'rotation_keep_codes', set())
-
-    # 记录本次目标股票集合，供价格缓存批量查询使用
-    try:
-        context.target_position_keys = list(target_position.keys())
-    except Exception:
-        context.target_position_keys = []
 
     # 初始化或获取延迟卖出集合（用于T+1或当日买入的情况）
     if not hasattr(context, 'deferred_sells'):
@@ -1665,7 +1600,8 @@ def adjust_position(context, target_position):
     if len(target_position) == 0:
         log.warning('目标持仓为空，将清空所有持仓')
     
-    # 获取保留股票集合（规范化代码）（已在函数顶部初始化）
+    # 获取保留股票集合（规范化代码）
+    keep_codes = getattr(context, 'rotation_keep_codes', set())
     if keep_codes:
         log.debug(f'本次调仓将保留以下股票不卖出: {keep_codes}')
     
