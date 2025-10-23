@@ -1123,21 +1123,23 @@ def handle_data(context, data):
                 else:
                     log.info('股息数据为空')
                 
-                # 计算股息支付率（记录原始与截断值以便诊断）
-                net_profit_val = float(net_profit) if pd.notna(net_profit) else 0.0
-                dividend_amount_val = float(dividend_amount) if pd.notna(dividend_amount) else 0.0
+                # 计算股息支付率（不做截断，允许负值；净利润为0返回NaN）
+                net_profit_val = pd.to_numeric(net_profit, errors='coerce')
+                dividend_amount_val = pd.to_numeric(dividend_amount, errors='coerce')
                 
-                if net_profit_val > 0 and dividend_amount_val > 0:
-                    payout_ratio = (dividend_amount_val / net_profit_val) * 100
-                    final_ratio = min(payout_ratio, 100)
-                    log.info('股票 %s 股息支付率原始: %.2f%%, 截断: %.2f%% (净利润TTM: %.2f, 分红金额TTM: %.2f)' % (stock_code, payout_ratio, final_ratio, net_profit_val, dividend_amount_val))
-                    return final_ratio
-                else:
-                    log.info('股票 %s 股息支付率为0 (净利润TTM: %.2f, 分红金额TTM: %.2f)' % (stock_code, net_profit_val, dividend_amount_val))
-                    return 0
+                if pd.isna(net_profit_val) or pd.isna(dividend_amount_val):
+                    log.warning('股票 %s 股息支付率计算数据缺失: 净利润TTM=%s, 分红金额TTM=%s' % (stock_code, net_profit_val, dividend_amount_val))
+                    return np.nan
+                if float(net_profit_val) == 0.0:
+                    log.warning('股票 %s 净利润TTM为0，无法计算股息支付率，返回NaN')
+                    return np.nan
+                
+                payout_ratio = (float(dividend_amount_val) / float(net_profit_val)) * 100
+                log.info('股票 %s 股息支付率: %.2f%% (净利润TTM: %.2f, 分红金额TTM: %.2f)' % (stock_code, payout_ratio, float(net_profit_val), float(dividend_amount_val)))
+                return float(payout_ratio)
             except Exception as e:
                 log.error('计算股票%s股息支付率时发生错误: %s' % (stock_code, str(e)))
-                return 0
+                return np.nan
         
         # 处理每个股票的因子数据
         for stock in stock_pool:
@@ -1284,7 +1286,13 @@ def handle_data(context, data):
             def _div_val(s):
                 return stock_factors.get(s, {}).get('dividend_ratio', 0)
             def _payout_val(s):
-                return stock_factors.get(s, {}).get('payout_ratio', 0)
+                val = stock_factors.get(s, {}).get('payout_ratio', None)
+                try:
+                    if val is None or (isinstance(val, float) and np.isnan(val)):
+                        return -float('inf')
+                    return float(val)
+                except Exception:
+                    return -float('inf')
             def _insider_val(s):
                 return stock_factors.get(s, {}).get('insider_holding', 0)
             def _mcap_val(s):
