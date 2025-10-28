@@ -44,10 +44,43 @@ def initialize(context):
     context.last_buy_date = None
     
     # 交易结束日期设置（写死的日期）
-    context.trading_end_date = datetime.date(2025, 1, 13)  # 设置交易结束日期为2024年12月30日（周一）
+    context.trading_end_date = datetime.date(2026, 12, 31)  
     
     # 初始化全局变量
     g.recent_orders = []  # 用于跟踪最近的订单
+    try:
+        if 'is_trade' in globals() and is_trade():
+            run_daily(context, trade_rotation, time='09:35')
+            log.info('交易端：已注册09:35调仓定时任务')
+    except Exception as e:
+        log.warning(f'注册交易端定时任务失败: {e}')
+
+def before_trading_start(context, data):
+    """
+    交易端盘前处理：撤销未完成订单，避免冲突；可扩展其他检查。
+    """
+    try:
+        if 'is_trade' in globals() and is_trade():
+            try:
+                open_orders = get_open_orders()
+                for order_id in list((open_orders or {}).keys()):
+                    try:
+                        cancel_order(order_id)
+                    except Exception as e:
+                        log.warning(f'撤销订单失败 {order_id}: {e}')
+            except Exception as e:
+                log.warning(f'盘前撤销订单异常: {e}')
+    except Exception as e:
+        log.warning(f'before_trading_start 异常: {e}')
+
+def trade_rotation(context):
+    """
+    交易端定时任务：09:35触发一次选股+调仓；复用 handle_data 逻辑。
+    """
+    try:
+        handle_data(context, data={})
+    except Exception as e:
+        log.warning(f'交易端定时任务运行异常: {e}')
 
 def _normalize_local(code):
     """本地代码规范化函数 - 保留完整的股票代码格式"""
@@ -848,7 +881,10 @@ def handle_data(context, data):
                         position_amount = position.amount
                     
                     if position_amount > 0:
-                        order_target_percent(pos_key, 0)
+                        try:
+                            order_target_value(pos_key, 0)
+                        except Exception as e:
+                            log.warning('清仓下单失败 %s: %s' % (pos_key, e))
                         log.info('清仓股票: %s (持仓数量: %s)' % (pos_key, position_amount))
                 log.info('清仓操作完成')
             else:
@@ -1415,8 +1451,8 @@ def handle_data(context, data):
     # 仅为新增(to_buy)构建目标权重，避免对重复(overlap)做再平衡
     target_position = {}
     if to_buy:
-        # 设置权重为当前选择数量的等权，确保总权重<=100%
-        weight = 1.0 / max(len(top_stocks), 1)
+        # 设置权重为“新增股票数量”的等权，确保总权重<=100%
+        weight = 1.0 / max(len(to_buy), 1)
         for stock in to_buy:
             target_position[stock] = weight
         log.info(f'为新增{len(to_buy)}只股票设置目标权重，每只权重: {weight:.2%}')
@@ -1439,37 +1475,47 @@ def handle_data(context, data):
 
 def get_market_open_price(stock, context):
     """
-    获取开盘后5分钟（9:35）的价格作为交易价格
+    获取交易端实时价格（优先），回测端取9:35的5分钟收盘价；失败则回退到当日收盘价。
     """
     try:
-        # 获取当日9:35的分钟级数据
-        current_date = context.current_dt.date()
-        start_time = datetime.datetime.combine(current_date, datetime.time(9, 35))
-        end_time = start_time + datetime.timedelta(minutes=1)
+        # 交易端优先使用快照
+        try:
+            if 'is_trade' in globals() and is_trade():
+                snap = get_snapshot(stock)
+                px = None
+                if isinstance(snap, dict):
+                    info = snap.get(stock) if stock in snap else snap
+                    px = info.get('last_px') or info.get('open_px')
+                elif hasattr(snap, 'get'):
+                    info = snap.get(stock, snap)
+                    px = info.get('last_px') or info.get('open_px')
+                elif hasattr(snap, 'last_px'):
+                    px = getattr(snap, 'last_px', None) or getattr(snap, 'open_px', None)
+                if px is not None and np.isfinite(px):
+                    log.debug(f'股票{stock}实时价格: {px:.2f}')
+                    return float(px)
+        except Exception as e:
+            log.warning(f'获取股票{stock}实时快照失败，回退到历史K线: {e}')
         
-        # 使用get_history获取9:35这一分钟的数据
-        price_data = get_history(1, '5m', ['close'], security_list=[stock], 
-                               include=True)  # include=True包含当前未结束的周期
-        
-        if not price_data.empty:
+        # 回测端或快照失败：获取当日9:35的5分钟数据
+        price_data = get_history(1, '5m', ['close'], security_list=[stock], include=True)
+        if isinstance(price_data, pd.DataFrame) and not price_data.empty:
             stock_data = price_data[price_data['code'] == stock]
             if not stock_data.empty:
-                market_open_price = stock_data['close'].iloc[-1]  # 取最新的价格
+                market_open_price = stock_data['close'].iloc[-1]
                 log.debug(f'股票{stock}开盘后5分钟价格: {market_open_price:.2f}元')
-                return market_open_price
+                return float(market_open_price)
         
-        # 如果无法获取9:35的价格，尝试获取当前价格作为备选
+        # 兜底：当日日线收盘价
         current_data = get_history(1, '1d', ['close'], security_list=[stock])
-        if not current_data.empty:
+        if isinstance(current_data, pd.DataFrame) and not current_data.empty:
             stock_data = current_data[current_data['code'] == stock]
             if not stock_data.empty:
                 fallback_price = stock_data['close'].iloc[0]
-                log.warning(f'无法获取股票{stock}开盘后5分钟价格，使用当日收盘价: {fallback_price:.2f}元')
-                return fallback_price
-                
+                log.warning(f'无法获取股票{stock}9:35价格，使用当日收盘价: {fallback_price:.2f}元')
+                return float(fallback_price)
     except Exception as e:
-        log.error(f'获取股票{stock}开盘后5分钟价格失败: {str(e)}')
-    
+        log.error(f'获取股票{stock}价格失败: {str(e)}')
     return None
 
 def adjust_position(context, target_position):
@@ -1667,6 +1713,25 @@ def adjust_position(context, target_position):
     if len(target_position) > 0:
         log.debug(f'目标持仓股票: {list(target_position.keys())}')
 
+    # 预估卖出可回收资金（按可卖数量与开盘后5分钟价格）
+    estimated_release_cash = 0
+    try:
+        for stock in stocks_to_sell:
+            try:
+                pos = get_position(stock)
+                sellable_amount = getattr(pos, 'enable_amount', 0) if pos else 0
+                price = get_market_open_price(stock, context)
+                if not price and pos:
+                    price = getattr(pos, 'last_sale_price', None)
+                if price and sellable_amount > 0:
+                    estimated_release_cash += sellable_amount * price
+            except Exception:
+                continue
+        log.info(f'预估卖出可回收资金: {estimated_release_cash:.0f}元')
+    except Exception:
+        estimated_release_cash = 0
+        log.warning('预估卖出资金失败，按0处理')
+
     sell_orders = []  # 记录卖出订单
     for stock in stocks_to_sell:
         try:
@@ -1711,13 +1776,17 @@ def adjust_position(context, target_position):
     
     # 计算所有目标股票的资金需求
     stock_analysis = {}
+    # 基于“可用现金 + 预估卖出现金”计算买入资金基数
+    total_available_cash = available_cash + estimated_release_cash
+    cash_buffer = total_available_cash * 0.05  # 保留5%缓冲
+    buy_base_cash = max(total_available_cash - cash_buffer, 0)
     total_required_cash = 0
     total_released_cash = 0
     
     for stock in target_stocks:
         try:
             target_weight = target_position[stock]
-            target_value = portfolio_value * target_weight
+            target_value = buy_base_cash * target_weight
             
             # 验证目标权重合理性
             if target_weight <= 0 or target_weight > 1:
@@ -1770,12 +1839,13 @@ def adjust_position(context, target_position):
             log.error(f'分析股票{stock}时发生错误: {str(e)}')
             continue
     
-    # 计算实际可用资金（包括卖出释放的资金）
-    total_available_cash = available_cash + total_released_cash
+    # 基于预估卖出现金的资金分析
+    total_available_cash = available_cash + estimated_release_cash
     cash_buffer = total_available_cash * 0.05  # 保留5%缓冲
-    usable_cash = total_available_cash - cash_buffer
+    usable_cash = max(total_available_cash - cash_buffer, 0)
+    buy_base_cash = usable_cash
     
-    log.info(f'资金分析: 当前可用{available_cash:.0f}元, 卖出释放{total_released_cash:.0f}元, '
+    log.info(f'资金分析: 当前可用{available_cash:.0f}元, 预估卖出{estimated_release_cash:.0f}元, '
              f'总可用{total_available_cash:.0f}元, 需要{total_required_cash:.0f}元')
     
     # 如果资金不足，按比例缩减买入目标
