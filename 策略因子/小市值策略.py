@@ -1777,7 +1777,7 @@ def adjust_position(context, target_position):
     # 计算所有目标股票的资金需求
     stock_analysis = {}
     # 基于“可用现金 + 预估卖出现金”计算买入资金基数
-    total_available_cash = available_cash + estimated_release_cash
+    total_available_cash = available_cash
     cash_buffer = total_available_cash * 0.05  # 保留5%缓冲
     buy_base_cash = max(total_available_cash - cash_buffer, 0)
     total_required_cash = 0
@@ -1840,7 +1840,7 @@ def adjust_position(context, target_position):
             continue
     
     # 基于预估卖出现金的资金分析
-    total_available_cash = available_cash + estimated_release_cash
+    total_available_cash = available_cash
     cash_buffer = total_available_cash * 0.05  # 保留5%缓冲
     usable_cash = max(total_available_cash - cash_buffer, 0)
     buy_base_cash = usable_cash
